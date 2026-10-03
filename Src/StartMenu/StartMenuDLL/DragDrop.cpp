@@ -317,11 +317,12 @@ bool CMenuContainer::DragOut( int index, bool bApp )
 		}
 	}
 
-	// force synchronous operation
+	// Let shell drop targets perform lengthy data extraction asynchronously.
+	// The drop target still decides whether to use async mode.
 	{
 		CComQIPtr<IDataObjectAsyncCapability> pAsync(pDataObj);
 		if (pAsync)
-			pAsync->SetAsyncMode(FALSE);
+			pAsync->SetAsyncMode(TRUE);
 	}
 
 	// do drag drop
@@ -849,9 +850,8 @@ HRESULT STDMETHODCALLTYPE CMenuContainer::Drop( IDataObject *pDataObj, DWORD grf
 				dwEffect=*pdwEffect;
 				pTarget->DragOver(MK_LBUTTON|grfKeyState,pt,pdwEffect);
 			}
-			CComQIPtr<IDataObjectAsyncCapability> pAsync=pDataObj;
-			if (pAsync)
-				pAsync->SetAsyncMode(FALSE);
+			// Preserve the async capability selected by the drag source.
+			// IDropTarget must not force the source data object back to sync mode.
 			for (auto& it : s_Menus)
 			{
 				if (!it->m_bDestroyed)
