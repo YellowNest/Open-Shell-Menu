@@ -15,6 +15,8 @@
 #include <Windows.UI.Xaml.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <UIAutomation.h>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -32,6 +34,210 @@ static HMODULE GetThisModule( void )
 	GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 		(LPCTSTR)&GetThisModule, &module);
 	return module;
+}
+
+// The native Windows 11 taskbar applies its centered-layout movement in the
+// XAML/composition layer. The legacy Start HWND moves to the final layout
+// position immediately, which makes Open-Shell's separate layered window snap
+// while the visible Windows controls are still animating. For the research
+// build we sample the real Start automation element on a background MTA and
+// expose its physical screen rectangle to UpdateStartButtonPosition.
+struct TrackedStartRect
+{
+	RECT rect;
+	bool valid;
+
+	TrackedStartRect( void )
+	{
+		SetRectEmpty(&rect);
+		valid = false;
+	}
+};
+
+static SRWLOCK g_TrackLock = SRWLOCK_INIT;
+static std::map<HWND, TrackedStartRect> g_TrackedStartRects;
+static volatile LONG g_UiaTrackerStarted = 0;
+static volatile LONG g_UiaTrackerEnabled = 0;
+
+UINT GetWin11StartButtonTrackingMessage( void )
+{
+	static UINT message = RegisterWindowMessage(L"OpenShell.Win11StartButtonTracking");
+	return message;
+}
+
+static void ClearTrackedStartRects( void )
+{
+	AcquireSRWLockExclusive(&g_TrackLock);
+	for (auto it = g_TrackedStartRects.begin(); it != g_TrackedStartRects.end(); ++it)
+		it->second.valid = false;
+	ReleaseSRWLockExclusive(&g_TrackLock);
+}
+
+void RegisterWin11StartButtonTracking( HWND taskbar )
+{
+	if (!IsWin11() || !taskbar)
+		return;
+
+	AcquireSRWLockExclusive(&g_TrackLock);
+	g_TrackedStartRects.emplace(taskbar, TrackedStartRect());
+	ReleaseSRWLockExclusive(&g_TrackLock);
+}
+
+bool GetTrackedWin11StartButtonRect( HWND taskbar, RECT *rect )
+{
+	if (!taskbar || !rect)
+		return false;
+
+	bool valid = false;
+	AcquireSRWLockShared(&g_TrackLock);
+	auto it = g_TrackedStartRects.find(taskbar);
+	if (it != g_TrackedStartRects.end() && it->second.valid)
+	{
+		*rect = it->second.rect;
+		valid = true;
+	}
+	ReleaseSRWLockShared(&g_TrackLock);
+	return valid;
+}
+
+static bool StoreTrackedStartRect( HWND taskbar, const RECT *rect, bool valid )
+{
+	bool changed = false;
+	AcquireSRWLockExclusive(&g_TrackLock);
+	TrackedStartRect &entry = g_TrackedStartRects[taskbar];
+	if (valid)
+	{
+		changed = !entry.valid || !EqualRect(&entry.rect, rect);
+		entry.rect = *rect;
+		entry.valid = true;
+	}
+	else if (entry.valid)
+	{
+		entry.valid = false;
+		changed = true;
+	}
+	ReleaseSRWLockExclusive(&g_TrackLock);
+	return changed;
+}
+
+static HRESULT ResolveAutomationStartButton( IUIAutomation *automation, HWND taskbar, IUIAutomationElement **element )
+{
+	if (!automation || !taskbar || !element)
+		return E_INVALIDARG;
+	*element = NULL;
+
+	CComPtr<IUIAutomationElement> taskbarElement;
+	HRESULT hr = automation->ElementFromHandle(taskbar, &taskbarElement);
+	if (FAILED(hr) || !taskbarElement)
+		return FAILED(hr) ? hr : E_FAIL;
+
+	VARIANT value;
+	VariantInit(&value);
+	value.vt = VT_BSTR;
+	value.bstrVal = SysAllocString(L"StartButton");
+	if (!value.bstrVal)
+		return E_OUTOFMEMORY;
+
+	CComPtr<IUIAutomationCondition> condition;
+	hr = automation->CreatePropertyCondition(UIA_AutomationIdPropertyId, value, &condition);
+	VariantClear(&value);
+	if (FAILED(hr) || !condition)
+		return FAILED(hr) ? hr : E_FAIL;
+
+	return taskbarElement->FindFirst(TreeScope_Descendants, condition, element);
+}
+
+static DWORD WINAPI UiAutomationTrackerThread( LPVOID )
+{
+	HMODULE module = NULL;
+	GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+		(LPCTSTR)&UiAutomationTrackerThread, &module);
+
+	HRESULT com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+	CComPtr<IUIAutomation> automation;
+	if (SUCCEEDED(com))
+	{
+		static const GUID CLSID_CUIAutomationLocal =
+		{ 0xff48dba4, 0x60ef, 0x4201, { 0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e } };
+		CoCreateInstance(CLSID_CUIAutomationLocal, NULL, CLSCTX_INPROC_SERVER,
+			__uuidof(IUIAutomation), (void**)&automation);
+	}
+
+	std::map<HWND, CComPtr<IUIAutomationElement>> elements;
+	while (InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
+	{
+		if (!InterlockedCompareExchange(&g_UiaTrackerEnabled, 0, 0) || !automation)
+		{
+			Sleep(50);
+			continue;
+		}
+
+		std::vector<HWND> taskbars;
+		AcquireSRWLockShared(&g_TrackLock);
+		for (auto it = g_TrackedStartRects.begin(); it != g_TrackedStartRects.end(); ++it)
+			taskbars.push_back(it->first);
+		ReleaseSRWLockShared(&g_TrackLock);
+
+		for (size_t i = 0; i < taskbars.size(); i++)
+		{
+			HWND taskbar = taskbars[i];
+			if (!IsWindow(taskbar))
+			{
+				StoreTrackedStartRect(taskbar, NULL, false);
+				elements.erase(taskbar);
+				continue;
+			}
+
+			CComPtr<IUIAutomationElement> &start = elements[taskbar];
+			if (!start)
+			{
+				HRESULT hr = ResolveAutomationStartButton(automation, taskbar, &start);
+				if (FAILED(hr) || !start)
+				{
+					StoreTrackedStartRect(taskbar, NULL, false);
+					continue;
+				}
+			}
+
+			RECT rect = {};
+			HRESULT hr = start->get_CurrentBoundingRectangle(&rect);
+			if (FAILED(hr) || rect.right <= rect.left || rect.bottom <= rect.top)
+			{
+				start.Release();
+				StoreTrackedStartRect(taskbar, NULL, false);
+				continue;
+			}
+
+			if (StoreTrackedStartRect(taskbar, &rect, true))
+				PostMessage(taskbar, GetWin11StartButtonTrackingMessage(), 0, 0);
+		}
+
+		// RepositionThemeTransition is normally rendered at display cadence.
+		// 15 ms keeps this research follower close to a 60 Hz composition pass.
+		Sleep(15);
+	}
+
+	elements.clear();
+	automation.Release();
+	if (SUCCEEDED(com))
+		CoUninitialize();
+	InterlockedExchange(&g_UiaTrackerStarted, 0);
+
+	if (module)
+		FreeLibraryAndExitThread(module, 0);
+	return 0;
+}
+
+static void EnsureUiAutomationTracker( void )
+{
+	if (InterlockedCompareExchange(&g_UiaTrackerStarted, 1, 0) != 0)
+		return;
+
+	HANDLE thread = CreateThread(NULL, 0, UiAutomationTrackerThread, NULL, 0, NULL);
+	if (thread)
+		CloseHandle(thread);
+	else
+		InterlockedExchange(&g_UiaTrackerStarted, 0);
 }
 
 struct StartElement
@@ -701,6 +907,11 @@ void StartWin11StartButtonMonitor( void )
 		return;
 
 	InterlockedExchange(&g_StartButtonActive, 1);
+	bool track = GetSettingBool(L"EnableStartButton");
+	InterlockedExchange(&g_UiaTrackerEnabled, track ? 1 : 0);
+	if (track)
+		EnsureUiAutomationTracker();
+
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
@@ -715,6 +926,13 @@ void UpdateWin11StartButtonMonitor( void )
 {
 	if (!IsWin11())
 		return;
+
+	bool track = GetSettingBool(L"EnableStartButton");
+	InterlockedExchange(&g_UiaTrackerEnabled, track ? 1 : 0);
+	if (track)
+		EnsureUiAutomationTracker();
+	else
+		ClearTrackedStartRects();
 
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
@@ -733,6 +951,8 @@ void StopWin11StartButtonMonitor( void )
 	if (!IsWin11())
 		return;
 
+	InterlockedExchange(&g_UiaTrackerEnabled, 0);
+	ClearTrackedStartRects();
 	InterlockedExchange(&g_StartButtonActive, 0);
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
