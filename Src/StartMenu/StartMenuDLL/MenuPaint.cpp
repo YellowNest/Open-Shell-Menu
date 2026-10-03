@@ -2847,7 +2847,7 @@ void CProgramsTree::DrawTreeItem( HDC hdc, HDC hsrc, HTREEITEM hItem, const RECT
 
 	// draw icon
 	rc.left=left;
-	int iconSize=GetScaledIconSize(MenuSkin::ICON_SIZE_SMALL);
+	int iconSize=CMenuContainer::GetScaledIconSize(MenuSkin::ICON_SIZE_SMALL);
 	int x=rc.left-iconSize-3-iconPadding.right;
 	int y=rc.top+iconTopOffset;
 
