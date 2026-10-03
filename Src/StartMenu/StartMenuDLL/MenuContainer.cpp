@@ -3359,11 +3359,7 @@ void CMenuContainer::InitWindowInternal( bool bDontShrink, const POINT &corner, 
 
 			SelectObject(hdc,settings.font);
 			int w=0, h=0;
-			int iconSize=0;
-			if (settings.iconSize==MenuSkin::ICON_SIZE_SMALL)
-				iconSize=g_ItemManager.SMALL_ICON_SIZE;
-			else if (settings.iconSize==MenuSkin::ICON_SIZE_LARGE)
-				iconSize=g_ItemManager.LARGE_ICON_SIZE;
+			int iconSize=GetScaledIconSize(settings.iconSize);
 			if (item.id==MENU_PROGRAMS_TREE)
 				h=0; // hide it for now
 			else if (!s_bShowTopEmpty && m_Items.size()>1 && (m_Items[i].id==MENU_EMPTY_TOP || (i>0 && m_Items[i-1].id==MENU_EMPTY_TOP)))
@@ -7334,6 +7330,22 @@ void CMenuContainer::HideStartMenu( void )
 	for (std::vector<CMenuContainer*>::iterator it=s_Menus.begin();it!=s_Menus.end();++it)
 		if (!(*it)->m_bDestroyed)
 			(*it)->ShowWindow(SW_HIDE);
+}
+
+int CMenuContainer::GetScaledIconSize( MenuSkin::TIconSize iconSize )
+{
+	int size=0;
+	if (iconSize==MenuSkin::ICON_SIZE_SMALL)
+		size=g_ItemManager.SMALL_ICON_SIZE;
+	else if (iconSize==MenuSkin::ICON_SIZE_LARGE)
+		size=g_ItemManager.LARGE_ICON_SIZE;
+	else
+		return 0;
+
+	int baseDpi=CItemManager::GetDPI(true);
+	if (baseDpi>0 && s_Skin.Dpi>0 && baseDpi!=s_Skin.Dpi)
+		size=MulDiv(size,s_Skin.Dpi,baseDpi);
+	return max(size,1);
 }
 
 bool CMenuContainer::IsMenuWindow( HWND hWnd )
