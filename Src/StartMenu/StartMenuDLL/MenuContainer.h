@@ -327,6 +327,7 @@ public:
 
 	static bool CloseStartMenu( void );
 	static bool IsMenuOpened( void ) { return !s_Menus.empty(); }
+	static int GetScaledIconSize( MenuSkin::TIconSize iconSize );
 	static bool HasInputHandler( void ) { return s_pFrameworkInputPane!=NULL; }
 	static bool CanShowMenu( void ) { return s_Menus.empty() || !s_bPreventClosing; }
 	static bool IsMenuWindow( HWND hWnd );
