@@ -1098,7 +1098,11 @@ extern "C" HRESULT STDMETHODCALLTYPE OpenShellDllGetClassObject( REFCLSID clsid,
 		return CLASS_E_CLASSNOTAVAILABLE;
 	return g_Factory.QueryInterface(riid,ppv);
 }
+#ifdef _M_IX86
+#pragma comment(linker, "/EXPORT:DllGetClassObject=_OpenShellDllGetClassObject@12,PRIVATE")
+#else
 #pragma comment(linker, "/EXPORT:DllGetClassObject=OpenShellDllGetClassObject,PRIVATE")
+#endif
 
 static bool SameText( const wchar_t *left, const wchar_t *right )
 {
