@@ -42,7 +42,9 @@ jobs:
           $baseVersion = "$($version.Major).$($version.Minor).$($version.Build + 1)"
 
           # Handle PR Suffix
-          if ("${{ github.event_name }}" -eq "pull_request") {
+          if ("${{ github.head_ref }}" -eq "test/issue-2384-tabs-4.4.211") {
+            $finalVersion = "4.4.211"
+          } elseif ("${{ github.event_name }}" -eq "pull_request") {
             $shortSha = "${{ github.event.pull_request.head.sha }}".Substring(0, 7)
             $finalVersion = "$baseVersion-pr-$shortSha"
           } else {
