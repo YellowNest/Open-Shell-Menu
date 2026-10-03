@@ -1708,6 +1708,23 @@ static const wchar_t *g_SkinSettingAliases[]={
 	NULL
 };
 
+int MenuSkin::GetIconSize( TIconSize iconSize ) const
+{
+	int size;
+	if (iconSize==ICON_SIZE_SMALL)
+		size=CItemManager::SMALL_ICON_SIZE;
+	else if (iconSize==ICON_SIZE_LARGE)
+		size=CItemManager::LARGE_ICON_SIZE;
+	else
+		return 0;
+
+	// Cached icons use the system (or overridden) DPI; menu geometry uses the skin DPI.
+	int baseDpi=CItemManager::GetDPI(true);
+	if (size>0 && baseDpi>0 && Dpi>0 && baseDpi!=Dpi)
+		return max(MulDiv(size,Dpi,baseDpi),1);
+	return size;
+}
+
 // Load the skin from the module. If hMod is NULL loads the "custom" skin from 1.txt
 bool MenuSkin::LoadSkin( HMODULE hMod, const wchar_t *variation, const wchar_t *optionsStr, TSkinType skinType, unsigned int flags, int dpi )
 {
@@ -2651,7 +2668,7 @@ bool MenuSkin::LoadSkin( HMODULE hMod, const wchar_t *variation, const wchar_t *
 		}
 		else
 		{
-			int iconSize=CItemManager::SMALL_ICON_SIZE;
+			int iconSize=GetIconSize(ICON_SIZE_SMALL);
 			Pin_bitmap_Size.cx=Pin_bitmap_Size.cy=iconSize;
 			BITMAPINFO bi={0};
 			bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
@@ -2702,7 +2719,7 @@ bool MenuSkin::LoadSkin( HMODULE hMod, const wchar_t *variation, const wchar_t *
 		}
 		else
 		{
-			int iconSize=CItemManager::SMALL_ICON_SIZE;
+			int iconSize=GetIconSize(ICON_SIZE_SMALL);
 			More_bitmap_Size.cx=More_bitmap_Size.cy=iconSize;
 			BITMAPINFO bi={0};
 			bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
@@ -2997,7 +3014,7 @@ bool MenuSkin::LoadSkin( HMODULE hMod, const wchar_t *variation, const wchar_t *
 				settings.opacity=(Main_opacity==OPACITY_FULLALPHA || Main_opacity==OPACITY_FULLGLASS)?Main_opacity:OPACITY_SOLID;
 				if (Programs_icon.GetBitmap())
 				{
-					int dx=(Main_icon_size==ICON_SIZE_LARGE?g_ItemManager.LARGE_ICON_SIZE:g_ItemManager.SMALL_ICON_SIZE)-Programs_icon_size.cx;
+					int dx=GetIconSize(Main_icon_size==ICON_SIZE_LARGE?ICON_SIZE_LARGE:ICON_SIZE_SMALL)-Programs_icon_size.cx;
 					if (dx>0)
 						settings.iconPadding.right+=dx;
 				}
@@ -3036,9 +3053,9 @@ bool MenuSkin::LoadSkin( HMODULE hMod, const wchar_t *variation, const wchar_t *
 		else if (i==SHUTDOWN_BUTTON || i==SHUTDOWN_BUTTON_SEARCH || i==SHUTDOWN_BUTTON_JUMP)
 			iconHeight=Shutdown_bitmap_Size.cy;
 		else if (settings.iconSize==ICON_SIZE_SMALL)
-			iconHeight=g_ItemManager.SMALL_ICON_SIZE;
+			iconHeight=GetIconSize(ICON_SIZE_SMALL);
 		else if (settings.iconSize==ICON_SIZE_LARGE)
-			iconHeight=g_ItemManager.LARGE_ICON_SIZE;
+			iconHeight=GetIconSize(ICON_SIZE_LARGE);
 		else if (settings.iconSize==ICON_SIZE_PROGRAMS)
 			iconHeight=Programs_icon_size.cy?Programs_icon_size.cy:10;
 		iconHeight+=settings.iconPadding.top+settings.iconPadding.bottom;

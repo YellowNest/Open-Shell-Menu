@@ -71,7 +71,8 @@ void CProgramsTree::Create( CMenuContainer *pOwner )
 	TreeView_SetItemHeight(hWnd,settings.itemHeight);
 
 	SubclassWindow(hWnd);
-	m_ImageList=ImageList_Create(CItemManager::SMALL_ICON_SIZE+settings.iconPadding.left+settings.iconPadding.right,CItemManager::SMALL_ICON_SIZE,ILC_COLOR32|ILC_MASK|ILC_MIRROR,1,16);
+	int iconSize=skin.GetIconSize(MenuSkin::ICON_SIZE_SMALL);
+	m_ImageList=ImageList_Create(iconSize+settings.iconPadding.left+settings.iconPadding.right,iconSize,ILC_COLOR32|ILC_MASK|ILC_MIRROR,1,16);
 	TreeView_SetImageList(hWnd,m_ImageList,TVSIL_NORMAL);
 	TreeView_SetIndent(hWnd,TreeView_GetIndent(hWnd)+skin.Programs_indent);
 	m_DragItem=NULL;
@@ -464,7 +465,7 @@ bool CProgramsTree::GetInsertRect( RECT &rc ) const
 	TreeView_GetItemRect(m_hWnd,m_InsertMark,&itemRect,TRUE);
 
 	GetClientRect(&rc);
-	rc.left=itemRect.left-CItemManager::SMALL_ICON_SIZE-3-CMenuContainer::s_Skin.ItemSettings[MenuSkin::PROGRAMS_TREE_ITEM].iconPadding.right;
+	rc.left=itemRect.left-CMenuContainer::s_Skin.GetIconSize(MenuSkin::ICON_SIZE_SMALL)-3-CMenuContainer::s_Skin.ItemSettings[MenuSkin::PROGRAMS_TREE_ITEM].iconPadding.right;
 	const POINT *sizes=CMenuContainer::s_Skin.GetArrowsBitmapSizes();
 	int h=sizes[1].y;
 	rc.top=(m_bInsertAfter?itemRect.bottom:itemRect.top)-h/2;

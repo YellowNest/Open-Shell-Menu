@@ -3359,11 +3359,7 @@ void CMenuContainer::InitWindowInternal( bool bDontShrink, const POINT &corner, 
 
 			SelectObject(hdc,settings.font);
 			int w=0, h=0;
-			int iconSize=0;
-			if (settings.iconSize==MenuSkin::ICON_SIZE_SMALL)
-				iconSize=g_ItemManager.SMALL_ICON_SIZE;
-			else if (settings.iconSize==MenuSkin::ICON_SIZE_LARGE)
-				iconSize=g_ItemManager.LARGE_ICON_SIZE;
+			int iconSize=s_Skin.GetIconSize(settings.iconSize);
 			if (item.id==MENU_PROGRAMS_TREE)
 				h=0; // hide it for now
 			else if (!s_bShowTopEmpty && m_Items.size()>1 && (m_Items[i].id==MENU_EMPTY_TOP || (i>0 && m_Items[i-1].id==MENU_EMPTY_TOP)))

@@ -2184,17 +2184,16 @@ void CMenuContainer::DrawBackground( HDC hdc, const RECT &drawRect )
 
 		bool bNoIcon=!item.bInline && settings.iconSize==MenuSkin::ICON_SIZE_NONE;
 		SIZE iconSize;
-		if (settings.iconSize==MenuSkin::ICON_SIZE_SMALL)
-			iconSize.cx=iconSize.cy=g_ItemManager.SMALL_ICON_SIZE;
-		else if (settings.iconSize==MenuSkin::ICON_SIZE_LARGE)
-			iconSize.cx=iconSize.cy=g_ItemManager.LARGE_ICON_SIZE;
+		if (settings.iconSize==MenuSkin::ICON_SIZE_SMALL || settings.iconSize==MenuSkin::ICON_SIZE_LARGE)
+			iconSize.cx=iconSize.cy=s_Skin.GetIconSize(settings.iconSize);
 		else if (settings.iconSize==MenuSkin::ICON_SIZE_PROGRAMS)
 		{
 			if (s_Skin.Programs_icon.GetBitmap())
 				iconSize=s_Skin.Programs_icon_size;
 			else
 			{
-				iconSize.cx=s_Skin.ItemSettings[MenuSkin::COLUMN1_ITEM].iconSize==MenuSkin::ICON_SIZE_SMALL?g_ItemManager.SMALL_ICON_SIZE:g_ItemManager.LARGE_ICON_SIZE;
+				MenuSkin::TIconSize programsIconSize=s_Skin.ItemSettings[MenuSkin::COLUMN1_ITEM].iconSize==MenuSkin::ICON_SIZE_SMALL?MenuSkin::ICON_SIZE_SMALL:MenuSkin::ICON_SIZE_LARGE;
+				iconSize.cx=s_Skin.GetIconSize(programsIconSize);
 				iconSize.cy=7;
 			}
 		}
@@ -2848,16 +2847,24 @@ void CProgramsTree::DrawTreeItem( HDC hdc, HDC hsrc, HTREEITEM hItem, const RECT
 
 	// draw icon
 	rc.left=left;
-	int iconSize=CItemManager::SMALL_ICON_SIZE;
+	int iconSize=skin.GetIconSize(MenuSkin::ICON_SIZE_SMALL);
 	int x=rc.left-iconSize-3-iconPadding.right;
 	int y=rc.top+iconTopOffset;
 
-	if (pItem->pItemInfo1 && pItem->pItemInfo1->smallIcon)
+	if (pItem->pItemInfo1 && pItem->pItemInfo1->smallIcon && pItem->pItemInfo1->smallIcon->bitmap)
 	{
-		HGDIOBJ bmp0=SelectObject(hsrc,pItem->pItemInfo1->smallIcon->bitmap);
-		BLENDFUNCTION func={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
-		AlphaBlend(hdc,x,y,iconSize,iconSize,hsrc,0,0,iconSize,iconSize,func);
-		SelectObject(hsrc,bmp0);
+		HBITMAP bitmap=pItem->pItemInfo1->smallIcon->bitmap;
+		BITMAP info;
+		if (GetObject(bitmap,sizeof(info),&info))
+		{
+			HGDIOBJ bmp0=SelectObject(hsrc,bitmap);
+			if (bmp0)
+			{
+				BLENDFUNCTION func={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+				AlphaBlend(hdc,x,y,iconSize,iconSize,hsrc,0,0,info.bmWidth,info.bmHeight,func);
+				SelectObject(hsrc,bmp0);
+			}
+		}
 	}
 
 	// draw text

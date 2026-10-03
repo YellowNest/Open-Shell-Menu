@@ -411,6 +411,7 @@ struct MenuSkin
 	bool LoadMenuSkin( const wchar_t *fname, const wchar_t *variation, const wchar_t *optionsStr, TSkinType skinType, unsigned int flags, int dpi );
 	void LoadDefaultMenuSkin( TSkinType skinType, unsigned int flags, int dpi );
 	const POINT *GetArrowsBitmapSizes( void ) const; // insert left, middle size, insert right, right arrow, left arrow, down arrow, total size
+	int GetIconSize( TIconSize iconSize ) const;
 	void PretilePatterns( int width );
 	void ParseOptionsString( const wchar_t *optionsStr, std::map<CString,CString> &options ) const;
 	bool ComputeOptionStates( const std::map<CString,CString> &options, std::vector<const wchar_t*> &values, bool bTranslateValues ) const;
