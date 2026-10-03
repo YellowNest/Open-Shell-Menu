@@ -42,7 +42,9 @@ jobs:
           $baseVersion = "$($version.Major).$($version.Minor).$($version.Build + 1)"
 
           # Handle PR Suffix
-          if ("${{ github.ref }}" -eq "refs/heads/test/safe-baseline-4.4.204") {
+          if ("${{ github.ref }}" -eq "refs/heads/research/win11-start-glyph") {
+            $finalVersion = "4.4.205"
+          } elseif ("${{ github.ref }}" -eq "refs/heads/test/safe-baseline-4.4.204") {
             $finalVersion = "4.4.204"
           } elseif ("${{ github.event_name }}" -eq "pull_request") {
             $shortSha = "${{ github.event.pull_request.head.sha }}".Substring(0, 7)
