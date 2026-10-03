@@ -419,7 +419,8 @@ void CMenuContainer::GetDragEffect( DWORD &grfKeyState, DWORD *pdwEffect )
 	FORMATETC format1={s_ShellFormat,NULL,DVASPECT_CONTENT,-1,TYMED_HGLOBAL};
 	FORMATETC format2={s_ShellUrlFormat,NULL,DVASPECT_CONTENT,-1,TYMED_HGLOBAL};
 	FORMATETC format3={s_MetroLinkFormat,NULL,DVASPECT_CONTENT,-1,TYMED_HGLOBAL};
-	if (m_pDragObject->QueryGetData(&format1)!=S_OK && m_pDragObject->QueryGetData(&format2)!=S_OK && m_pDragObject->QueryGetData(&format3)!=S_OK)
+	FORMATETC format4={CF_HDROP,NULL,DVASPECT_CONTENT,-1,TYMED_HGLOBAL};
+	if (m_pDragObject->QueryGetData(&format1)!=S_OK && m_pDragObject->QueryGetData(&format2)!=S_OK && m_pDragObject->QueryGetData(&format3)!=S_OK && m_pDragObject->QueryGetData(&format4)!=S_OK)
 	{
 		*pdwEffect=DROPEFFECT_NONE;
 		return;
