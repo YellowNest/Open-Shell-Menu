@@ -2192,7 +2192,8 @@ void CMenuContainer::DrawBackground( HDC hdc, const RECT &drawRect )
 				iconSize=s_Skin.Programs_icon_size;
 			else
 			{
-				iconSize.cx=GetScaledIconSize(s_Skin.ItemSettings[MenuSkin::COLUMN1_ITEM].iconSize);
+				MenuSkin::TIconSize programsIconSize=s_Skin.ItemSettings[MenuSkin::COLUMN1_ITEM].iconSize==MenuSkin::ICON_SIZE_SMALL?MenuSkin::ICON_SIZE_SMALL:MenuSkin::ICON_SIZE_LARGE;
+				iconSize.cx=GetScaledIconSize(programsIconSize);
 				iconSize.cy=7;
 			}
 		}
@@ -2852,9 +2853,12 @@ void CProgramsTree::DrawTreeItem( HDC hdc, HDC hsrc, HTREEITEM hItem, const RECT
 
 	if (pItem->pItemInfo1 && pItem->pItemInfo1->smallIcon)
 	{
-		HGDIOBJ bmp0=SelectObject(hsrc,pItem->pItemInfo1->smallIcon->bitmap);
+		HBITMAP bitmap=pItem->pItemInfo1->smallIcon->bitmap;
+		BITMAP info;
+		GetObject(bitmap,sizeof(info),&info);
+		HGDIOBJ bmp0=SelectObject(hsrc,bitmap);
 		BLENDFUNCTION func={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
-		AlphaBlend(hdc,x,y,iconSize,iconSize,hsrc,0,0,iconSize,iconSize,func);
+		AlphaBlend(hdc,x,y,iconSize,iconSize,hsrc,0,0,info.bmWidth,info.bmHeight,func);
 		SelectObject(hsrc,bmp0);
 	}
 
