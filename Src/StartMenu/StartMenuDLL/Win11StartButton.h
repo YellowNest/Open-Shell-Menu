@@ -6,3 +6,9 @@
 void StartWin11StartButtonMonitor( void );
 void UpdateWin11StartButtonMonitor( void );
 void StopWin11StartButtonMonitor( void );
+
+// Research helper for following the native Windows 11 Start button while the
+// centered taskbar performs its XAML reposition transition.
+void RegisterWin11StartButtonTracking( HWND taskbar );
+bool GetTrackedWin11StartButtonRect( HWND taskbar, RECT *rect );
+UINT GetWin11StartButtonTrackingMessage( void );
