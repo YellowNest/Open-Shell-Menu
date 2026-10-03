@@ -10,6 +10,7 @@
 #include "Win11StartButton.h"
 #include "Settings.h"
 #include "LogManager.h"
+#include "ResourceHelper.h"
 
 #include <Windows.UI.Xaml.h>
 #include <xamlom.h>
@@ -24,6 +25,14 @@ static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 
 static volatile LONG g_StartButtonActive = 0;
 static volatile LONG g_ConnectStarted = 0;
+
+static HMODULE GetThisModule( void )
+{
+	HMODULE module = NULL;
+	GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		(LPCTSTR)&GetThisModule, &module);
+	return module;
+}
 
 struct StartElement
 {
@@ -78,6 +87,7 @@ public:
 		m_Refs = 1;
 		m_Advised = false;
 		m_Dispatch = NULL;
+		m_PrimaryStart = 0;
 		InitializeCriticalSection(&m_Lock);
 	}
 
@@ -93,6 +103,7 @@ public:
 			g_Tap = NULL;
 		ReleaseSRWLockExclusive(&g_TapLock);
 
+		InterlockedExchange(&g_ConnectStarted, 0);
 		DeleteCriticalSection(&m_Lock);
 	}
 
@@ -138,7 +149,19 @@ public:
 		m_Site.Release();
 
 		if (!site)
+		{
+			AcquireSRWLockExclusive(&g_TapLock);
+			if (g_Tap == this)
+				g_Tap = NULL;
+			ReleaseSRWLockExclusive(&g_TapLock);
+			InterlockedExchange(&g_ConnectStarted, 0);
 			return S_OK;
+		}
+
+		EnterCriticalSection(&m_Lock);
+		m_Elements.clear();
+		m_PrimaryStart = 0;
+		LeaveCriticalSection(&m_Lock);
 
 		m_Site = site;
 		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
@@ -185,7 +208,20 @@ public:
 			if (it != m_Elements.end())
 			{
 				interesting = it->second.visibilityOverride || it->second.hitTestOverride || IsStartControl(it->second);
+				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
+				if (wasPrimary)
+				{
+					m_PrimaryStart = 0;
+					for (auto candidate = m_Elements.begin(); candidate != m_Elements.end(); ++candidate)
+					{
+						if (IsStartControl(candidate->second))
+						{
+							m_PrimaryStart = candidate->first;
+							break;
+						}
+					}
+				}
 			}
 		}
 		else if (mutationType == Add)
@@ -202,6 +238,8 @@ public:
 				record.hitTestOverride = previous->second.hitTestOverride;
 			}
 			m_Elements[element.Handle] = record;
+			if (IsStartControl(record) && !m_PrimaryStart)
+				m_PrimaryStart = element.Handle;
 
 			interesting = IsStartControl(record) || IsStartGlyph(record) || IsUnderStartButtonLocked(record.parent);
 		}
@@ -254,14 +292,18 @@ private:
 
 		static const wchar_t CLASS_NAME[] = L"OpenShell.Win11StartButtonTap";
 		WNDCLASS wc = {};
+		HMODULE module = GetThisModule();
+		if (!module)
+			return false;
+
 		wc.lpfnWndProc = DispatchProc;
-		wc.hInstance = g_Instance;
+		wc.hInstance = module;
 		wc.lpszClassName = CLASS_NAME;
 		if (!RegisterClass(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
 			return false;
 
 		m_Dispatch = CreateWindowEx(0, CLASS_NAME, L"", 0, 0, 0, 0, 0,
-			HWND_MESSAGE, NULL, g_Instance, this);
+			HWND_MESSAGE, NULL, module, this);
 		return m_Dispatch != NULL;
 	}
 
@@ -279,13 +321,27 @@ private:
 		return false;
 	}
 
-	bool IsUnderStartButton( InstanceHandle handle )
+	InstanceHandle GetStartAncestor( InstanceHandle handle )
 	{
-		bool result = false;
+		InstanceHandle result = 0;
 		EnterCriticalSection(&m_Lock);
 		auto it = m_Elements.find(handle);
 		if (it != m_Elements.end())
-			result = IsUnderStartButtonLocked(it->second.parent);
+		{
+			InstanceHandle parent = it->second.parent;
+			for (int depth = 0; depth < 24 && parent; depth++)
+			{
+				auto pit = m_Elements.find(parent);
+				if (pit == m_Elements.end())
+					break;
+				if (IsStartControl(pit->second))
+				{
+					result = parent;
+					break;
+				}
+				parent = pit->second.parent;
+			}
+		}
 		LeaveCriticalSection(&m_Lock);
 		return result;
 	}
@@ -396,10 +452,14 @@ private:
 			return;
 
 		std::vector<std::pair<InstanceHandle, StartElement>> elements;
+		InstanceHandle primaryStart = 0;
 		EnterCriticalSection(&m_Lock);
+		primaryStart = m_PrimaryStart;
 		for (auto it = m_Elements.begin(); it != m_Elements.end(); ++it)
 			elements.push_back(*it);
 		LeaveCriticalSection(&m_Lock);
+
+		const bool allTaskbars = GetSettingBool(L"AllTaskbars");
 
 		for (size_t i = 0; i < elements.size(); i++)
 		{
@@ -408,7 +468,8 @@ private:
 
 			if (IsStartControl(record))
 			{
-				if (enabled)
+				bool target = allTaskbars || !primaryStart || handle == primaryStart;
+				if (enabled && target)
 				{
 					if (!record.hitTestOverride)
 					{
@@ -432,10 +493,15 @@ private:
 				continue;
 			}
 
-			if (!IsStartGlyph(record) || !IsUnderStartButton(handle))
+			if (!IsStartGlyph(record))
 				continue;
 
-			if (enabled)
+			InstanceHandle startAncestor = GetStartAncestor(handle);
+			if (!startAncestor)
+				continue;
+			bool target = allTaskbars || !primaryStart || startAncestor == primaryStart;
+
+			if (enabled && target)
 			{
 				if (!record.visibilityOverride)
 				{
@@ -465,6 +531,7 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	InstanceHandle m_PrimaryStart;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
@@ -573,8 +640,9 @@ static DWORD WINAPI ConnectThread( LPVOID )
 		return 0;
 	}
 
+	HMODULE module = GetThisModule();
 	wchar_t dllPath[MAX_PATH];
-	if (!GetModuleFileName(g_Instance, dllPath, _countof(dllPath)))
+	if (!module || !GetModuleFileName(module, dllPath, _countof(dllPath)))
 	{
 		FreeLibrary(runtime);
 		InterlockedExchange(&g_ConnectStarted, 0);
