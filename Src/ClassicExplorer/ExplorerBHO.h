@@ -51,6 +51,7 @@ public:
 		m_AltD=0;
 		m_FileSizeWidth=0;
 		m_ZoneWidth=0;
+		m_PreviousBho=NULL;
 	}
 
 	DECLARE_REGISTRY_RESOURCEID_V2_WITHOUT_MODULE(IDR_EXPLORERBHO, CExplorerBHO)
@@ -157,6 +158,7 @@ private:
 	int m_FileSizeWidth;
 	int m_ZoneWidth;
 	char m_AltD;
+	CExplorerBHO *m_PreviousBho; // previous live BHO on this Explorer thread
 
 	struct ComboItem
 	{
