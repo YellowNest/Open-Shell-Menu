@@ -1068,8 +1068,27 @@ HRESULT STDMETHODCALLTYPE CExplorerBHO::SetSite( IUnknown *pUnkSite )
 
 	if (pUnkSite)
 	{
+		// Explorer tabs can create multiple BHO instances on the same thread.
+		// Keep a chain of live instances so closing one tab doesn't leave the
+		// shared tree/keyboard callbacks without a BHO for the remaining tab.
+		TlsData *pTlsData=GetTlsData();
+		if (pTlsData->bho!=this)
+		{
+			// SetSite may be called again for an existing instance. Remove it
+			// from its old position before making it current again.
+			for (CExplorerBHO *pBho=pTlsData->bho;pBho;pBho=pBho->m_PreviousBho)
+			{
+				if (pBho->m_PreviousBho==this)
+				{
+					pBho->m_PreviousBho=m_PreviousBho;
+					break;
+				}
+			}
+			m_PreviousBho=pTlsData->bho;
+			pTlsData->bho=this;
+		}
+
 		// hook
-		GetTlsData()->bho=this;
 		if (!m_Hook)
 		{
 			m_Hook=SetWindowsHookEx(WH_CBT,HookExplorer,NULL,GetCurrentThreadId());
@@ -1320,7 +1339,23 @@ HRESULT STDMETHODCALLTYPE CExplorerBHO::SetSite( IUnknown *pUnkSite )
 	else
 	{
 		// unhook
-		GetTlsData()->bho=NULL;
+		TlsData *pTlsData=GetTlsData();
+		if (pTlsData->bho==this)
+			pTlsData->bho=m_PreviousBho;
+		else
+		{
+			// Tabs can be closed out of creation order. Unlink this instance
+			// without leaving a dangling predecessor in the thread's chain.
+			for (CExplorerBHO *pBho=pTlsData->bho;pBho;pBho=pBho->m_PreviousBho)
+			{
+				if (pBho->m_PreviousBho==this)
+				{
+					pBho->m_PreviousBho=m_PreviousBho;
+					break;
+				}
+			}
+		}
+		m_PreviousBho=NULL;
 		if (m_Hook)
 			UnhookWindowsHookEx(m_Hook);
 		m_Hook=NULL;
