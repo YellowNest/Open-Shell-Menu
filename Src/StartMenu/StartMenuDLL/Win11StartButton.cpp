@@ -201,6 +201,7 @@ public:
 
 	~CWin11StartButtonTap( void )
 	{
+		DetachPointerProbe();
 		if (m_Visual && m_Advised)
 			m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
 		if (m_Dispatch && GetWindowThreadProcessId(m_Dispatch, NULL) == GetCurrentThreadId())
@@ -447,6 +448,8 @@ public:
 	}
 
 private:
+	friend class CStartPointerProbeHandler;
+
 	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 	{
 		CWin11StartButtonTap *tap = (CWin11StartButtonTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -925,20 +928,11 @@ private:
 
 			if (record.isStartControl)
 			{
-				bool target = allTaskbars || !primaryStart || handle == primaryStart;
-				if (enabled && target)
-				{
-					if (!record.hitTestOverride)
-					{
-						HRESULT hr = SetPropertyText(handle, L"IsHitTestVisible", L"False");
-						if (SUCCEEDED(hr))
-						{
-							bool value = true;
-							SetOverrideFlags(handle, NULL, &value);
-						}
-					}
-				}
-				else if (record.hitTestOverride)
+				// Research only: keep the real XAML Start control hit-testable so
+				// the pointer probe can observe its routed input. The existing
+				// WH_MOUSE hook still intercepts normal mouse input; holding F12
+				// in this research build bypasses that hook for controlled tests.
+				if (record.hitTestOverride)
 				{
 					HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
 					if (SUCCEEDED(hr))
