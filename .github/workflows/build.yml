@@ -43,7 +43,7 @@ jobs:
 
           # Handle PR Suffix
           if ("${{ github.ref }}" -eq "refs/heads/research/win11-start-reflow-animation-v2") {
-            $finalVersion = "4.4.206"
+            $finalVersion = "4.4.213"
           } elseif ("${{ github.ref }}" -eq "refs/heads/research/win11-start-glyph") {
             $finalVersion = "4.4.205"
           } elseif ("${{ github.ref }}" -eq "refs/heads/test/safe-baseline-4.4.204") {
