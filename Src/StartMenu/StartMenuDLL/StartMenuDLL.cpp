@@ -1235,6 +1235,9 @@ bool IsTouchTaskbar(void)
 
 static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPOS* pPos)
 {
+	if (IsWin11())
+		RegisterWin11StartButtonTracking(taskBar->taskBar);
+
 	if (IsStartButtonSmallIcons(taskBar->taskbarId) != IsTaskbarSmallIcons())
 		RecreateStartButton(taskBar->taskbarId);
 
@@ -1320,6 +1323,9 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 	if (taskBar->oldButton)
 		GetWindowRect(taskBar->oldButton, &rcOldButton);
 
+	RECT rcTrackedButton = {};
+	bool bTrackedButton = IsWin11() && GetTrackedWin11StartButtonRect(taskBar->taskBar, &rcTrackedButton);
+
 	int x, y;
 	if (uEdge == ABE_LEFT || uEdge == ABE_RIGHT)
 	{
@@ -1334,9 +1340,9 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 	else
 	{
 		if (GetWindowLongPtr(taskBar->rebar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
-			x = (taskBar->oldButton ? rcOldButton.right : rcTask.right) - taskBar->startButtonSize.cx;
+			x = (bTrackedButton ? rcTrackedButton.right : (taskBar->oldButton ? rcOldButton.right : rcTask.right)) - taskBar->startButtonSize.cx;
 		else
-			x = taskBar->oldButton ? rcOldButton.left : rcTask.left;
+			x = bTrackedButton ? rcTrackedButton.left : (taskBar->oldButton ? rcOldButton.left : rcTask.left);
 		if (GetSettingInt(L"StartButtonType") != START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
 			y = (rcTask.top + rcTask.bottom - taskBar->startButtonSize.cy) / 2;
 		else if (uEdge == ABE_TOP)
@@ -1767,6 +1773,16 @@ static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam
 		}
 	}
 	TaskbarInfo *taskBar=GetTaskbarInfo((int)dwRefData);
+	if (taskBar && uMsg==GetWin11StartButtonTrackingMessage())
+	{
+		if (taskBar->bReplaceButton)
+		{
+			WINDOWPOS pos = {};
+			pos.flags = SWP_NOZORDER;
+			UpdateStartButtonPosition(taskBar, &pos);
+		}
+		return 0;
+	}
 	if (taskBar && (uMsg==WM_NCMOUSEMOVE || uMsg==WM_MOUSEMOVE) && PointAroundStartButton((int)dwRefData))
 		TaskBarMouseMove(taskBar->taskbarId);
 	if (taskBar && uMsg==WM_POINTERACTIVATE && CMenuContainer::IsMenuOpened())
