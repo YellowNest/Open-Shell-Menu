@@ -6,3 +6,9 @@
 void StartWin11StartButtonMonitor( void );
 void UpdateWin11StartButtonMonitor( void );
 void StopWin11StartButtonMonitor( void );
+
+// Track the native Windows 11 Start control's real screen position while the
+// centered taskbar animates/reflows, so the replacement button follows it.
+void RegisterWin11StartButtonTracking( HWND taskbar );
+bool GetTrackedWin11StartButtonRect( HWND taskbar, RECT *rect );
+UINT GetWin11StartButtonTrackingMessage( void );
