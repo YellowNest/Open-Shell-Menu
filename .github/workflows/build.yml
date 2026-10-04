@@ -44,8 +44,8 @@ jobs:
           # Private YellowNest integration preview. Keep this branch-specific
           # override out of all upstream PR branches so the generated setup can
           # upgrade the locally installed 4.4.213 test build.
-          if ("${{ github.event_name }}" -eq "pull_request" -and "${{ github.head_ref }}" -eq "integration/yellownest-preview-4.4.215") {
-            $finalVersion = "4.4.215"
+          if ("${{ github.event_name }}" -eq "pull_request" -and "${{ github.head_ref }}" -eq "integration/yellownest-preview-4.4.216") {
+            $finalVersion = "4.4.216"
           } elseif ("${{ github.event_name }}" -eq "pull_request") {
             $shortSha = "${{ github.event.pull_request.head.sha }}".Substring(0, 7)
             $finalVersion = "$baseVersion-pr-$shortSha"
