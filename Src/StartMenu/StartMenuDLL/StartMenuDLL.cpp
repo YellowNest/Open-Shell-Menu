@@ -1316,9 +1316,29 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 		}
 	}
 
-	RECT rcOldButton;
+	// Prefer the actual Windows 11 XAML Start rectangle over the legacy
+	// child HWND. Modern taskbars don't expose the native Start button as a
+	// "Start" HWND, which previously made the replacement fall back to the
+	// taskbar edge and appear beside, rather than over, the native button.
+	RECT rcNativeButton = {};
+	bool hasNativeButton = false;
 	if (taskBar->oldButton)
-		GetWindowRect(taskBar->oldButton, &rcOldButton);
+		hasNativeButton = GetWindowRect(taskBar->oldButton, &rcNativeButton) != FALSE;
+
+	if (IsWin11())
+	{
+		// Request an asynchronous refresh in case layout/DPI/taskbar alignment
+		// changed since the last XAML callback. Use only the already-cached
+		// rectangle in this positioning call to avoid XAML reentrancy.
+		UpdateWin11StartButtonMonitor();
+
+		RECT rcXamlButton = {};
+		if (GetWin11StartButtonRect(taskBar->taskBar, &rcXamlButton))
+		{
+			rcNativeButton = rcXamlButton;
+			hasNativeButton = true;
+		}
+	}
 
 	int x, y;
 	if (uEdge == ABE_LEFT || uEdge == ABE_RIGHT)
@@ -1329,14 +1349,14 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 			x = rcTask.left;
 		else
 			x = rcTask.right - taskBar->startButtonSize.cx;
-		y = taskBar->oldButton ? rcOldButton.top : rcTask.top;
+		y = hasNativeButton ? rcNativeButton.top : rcTask.top;
 	}
 	else
 	{
 		if (GetWindowLongPtr(taskBar->rebar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
-			x = (taskBar->oldButton ? rcOldButton.right : rcTask.right) - taskBar->startButtonSize.cx;
+			x = (hasNativeButton ? rcNativeButton.right : rcTask.right) - taskBar->startButtonSize.cx;
 		else
-			x = taskBar->oldButton ? rcOldButton.left : rcTask.left;
+			x = hasNativeButton ? rcNativeButton.left : rcTask.left;
 		if (GetSettingInt(L"StartButtonType") != START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
 			y = (rcTask.top + rcTask.bottom - taskBar->startButtonSize.cy) / 2;
 		else if (uEdge == ABE_TOP)
@@ -1743,6 +1763,14 @@ static LRESULT CALLBACK SubclassTrayButtonProc( HWND hWnd, UINT uMsg, WPARAM wPa
 
 static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData )
 {
+	TaskbarInfo *taskBar=GetTaskbarInfo((int)dwRefData);
+	if (IsWin11() && uMsg==GetWin11StartButtonRectChangedMessage() && taskBar && taskBar->bReplaceButton)
+	{
+		WINDOWPOS pos={hWnd,NULL,0,0,0,0,SWP_NOZORDER|SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE};
+		UpdateStartButtonPosition(taskBar,&pos);
+		return 0;
+	}
+
 	if (uMsg==WM_MOUSEACTIVATE && (HIWORD(lParam)==WM_MBUTTONDOWN || GetWinVersion()>=WIN_VER_WIN10))
 	{
 		if (GetWinVersion()>=WIN_VER_WIN10 && CMenuContainer::IsMenuOpened() && CMenuContainer::HasInputHandler() && GetFocus())
@@ -1766,7 +1794,6 @@ static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam
 			return MA_ACTIVATEANDEAT; // ignore the next middle click, so it doesn't re-open the start menu
 		}
 	}
-	TaskbarInfo *taskBar=GetTaskbarInfo((int)dwRefData);
 	if (taskBar && (uMsg==WM_NCMOUSEMOVE || uMsg==WM_MOUSEMOVE) && PointAroundStartButton((int)dwRefData))
 		TaskBarMouseMove(taskBar->taskbarId);
 	if (taskBar && uMsg==WM_POINTERACTIVATE && CMenuContainer::IsMenuOpened())

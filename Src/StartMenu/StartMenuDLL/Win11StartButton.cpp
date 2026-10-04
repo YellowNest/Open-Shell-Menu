@@ -13,6 +13,7 @@
 #include "ResourceHelper.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.UI.Xaml.Media.h>
 #include <xamlom.h>
 #include <ocidl.h>
 #include <unordered_map>
@@ -21,8 +22,27 @@
 static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
 
+// Open-Shell intentionally targets an older Windows SDK baseline. The SDK
+// declaration of IOpenShellDesktopWindowXamlSourceNative is hidden behind the Windows
+// 10 RS5 target guard, even though this code is runtime-gated to Windows 11.
+// Keep the documented interface definition local instead of raising the
+// minimum target for the whole project.
+MIDL_INTERFACE("3cbcf1bf-2f76-4e9c-96ab-e84b37972554")
+IOpenShellDesktopWindowXamlSourceNative : public IUnknown
+{
+public:
+	virtual HRESULT STDMETHODCALLTYPE AttachToWindow( HWND parentWnd ) = 0;
+	virtual HRESULT STDMETHODCALLTYPE get_WindowHandle( HWND *hWnd ) = 0;
+};
+
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 static const UINT WM_OS_STARTBUTTON_SHUTDOWN = WM_APP + 0x35C;
+
+UINT GetWin11StartButtonRectChangedMessage( void )
+{
+	static UINT message = RegisterWindowMessage(L"OpenShell.Win11StartButtonRectChanged");
+	return message;
+}
 
 static volatile LONG g_StartButtonActive = 0;
 static volatile LONG g_ConnectStarted = 0;
@@ -40,7 +60,7 @@ struct StartElement
 	InstanceHandle parent;
 	CString type;
 	CString name;
-	bool visibilityOverride;
+	bool opacityOverride;
 	bool hitTestOverride;
 	bool startControlResolved;
 	bool isStartControl;
@@ -49,7 +69,7 @@ struct StartElement
 	StartElement( void )
 	{
 		parent = 0;
-		visibilityOverride = false;
+		opacityOverride = false;
 		hitTestOverride = false;
 		startControlResolved = false;
 		isStartControl = false;
@@ -68,22 +88,11 @@ static bool ContainsText( const CString &text, const wchar_t *part )
 
 static bool IsStartControlCandidate( const StartElement &element )
 {
-	if (!ContainsText(element.type, L"ExperienceToggleButton"))
-		return false;
-	return element.name == L"LaunchListButton" || element.name == L"StartButton";
-}
-
-static bool IsStartGlyph( const StartElement &element )
-{
-	if (element.name == L"Icon")
-		return true;
-	if (ContainsText(element.type, L"AnimatedVisualPlayer") || ContainsText(element.type, L"AepAnimatedIcon"))
-		return true;
-	if (ContainsText(element.type, L"FontIcon") || ContainsText(element.type, L"PathIcon") ||
-		ContainsText(element.type, L"ImageIcon") || ContainsText(element.type, L"BitmapIcon") ||
-		ContainsText(element.type, L"SymbolIcon"))
-		return true;
-	return false;
+	// x:Name has changed between Windows 11 taskbar implementations. The
+	// stable discriminator used by current taskbar code is the control class
+	// plus AutomationProperties.AutomationId == "StartButton", resolved later
+	// on the XAML thread.
+	return ContainsText(element.type, L"ExperienceToggleButton");
 }
 
 class CWin11StartButtonTap: public IObjectWithSite, public IVisualTreeServiceCallback2
@@ -155,7 +164,12 @@ public:
 			m_Advised = false;
 		}
 		m_Visual.Release();
+		m_Diagnostics.Release();
 		m_Site.Release();
+
+		EnterCriticalSection(&m_Lock);
+		m_StartRects.clear();
+		LeaveCriticalSection(&m_Lock);
 
 		if (!site)
 		{
@@ -169,6 +183,7 @@ public:
 
 		EnterCriticalSection(&m_Lock);
 		m_Elements.clear();
+		m_StartRects.clear();
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
 		LeaveCriticalSection(&m_Lock);
@@ -201,9 +216,21 @@ public:
 			return hr;
 		}
 
+		hr = site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+		if (FAILED(hr) || !m_Diagnostics)
+		{
+			m_Diagnostics.Release();
+			m_Visual.Release();
+			m_Site.Release();
+			BalanceInjectionReference();
+			InterlockedExchange(&g_ConnectStarted, 0);
+			return hr;
+		}
+
 		if (!CreateDispatchWindow())
 		{
 			DWORD error = GetLastError();
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
@@ -236,6 +263,7 @@ public:
 				SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
 				DestroyWindow(dispatch);
 			}
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
@@ -265,7 +293,7 @@ public:
 			auto it = m_Elements.find(element.Handle);
 			if (it != m_Elements.end())
 			{
-				interesting = it->second.visibilityOverride || it->second.hitTestOverride ||
+				interesting = it->second.opacityOverride || it->second.hitTestOverride ||
 					it->second.isStartControl || IsStartControlCandidate(it->second);
 				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
@@ -283,7 +311,7 @@ public:
 			auto previous = m_Elements.find(element.Handle);
 			if (previous != m_Elements.end())
 			{
-				record.visibilityOverride = previous->second.visibilityOverride;
+				record.opacityOverride = previous->second.opacityOverride;
 				record.hitTestOverride = previous->second.hitTestOverride;
 				record.startControlResolved = previous->second.startControlResolved;
 				record.isStartControl = previous->second.isStartControl;
@@ -295,8 +323,7 @@ public:
 			}
 			m_Elements[element.Handle] = record;
 
-			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
-				IsUnderStartButtonLocked(record.parent);
+			interesting = IsStartControlCandidate(record);
 		}
 		LeaveCriticalSection(&m_Lock);
 
@@ -305,8 +332,17 @@ public:
 		return S_OK;
 	}
 
-	STDMETHODIMP OnElementStateChanged( InstanceHandle, VisualElementState, LPCWSTR )
+	STDMETHODIMP OnElementStateChanged( InstanceHandle handle, VisualElementState, LPCWSTR )
 	{
+		bool interesting = false;
+		EnterCriticalSection(&m_Lock);
+		auto it = m_Elements.find(handle);
+		if (it != m_Elements.end())
+			interesting = it->second.isStartControl || IsStartControlCandidate(it->second);
+		LeaveCriticalSection(&m_Lock);
+
+		if (interesting)
+			RequestApply(false);
 		return S_OK;
 	}
 
@@ -381,8 +417,13 @@ private:
 			m_Advised = false;
 		}
 
+		m_Diagnostics.Release();
 		m_Visual.Release();
 		m_Site.Release();
+
+		EnterCriticalSection(&m_Lock);
+		m_StartRects.clear();
+		LeaveCriticalSection(&m_Lock);
 
 		if (m_Dispatch)
 		{
@@ -430,45 +471,6 @@ private:
 		return m_Dispatch != NULL;
 	}
 
-	bool IsUnderStartButtonLocked( InstanceHandle parent ) const
-	{
-		for (int depth = 0; depth < 24 && parent; depth++)
-		{
-			auto it = m_Elements.find(parent);
-			if (it == m_Elements.end())
-				break;
-			if (it->second.isStartControl)
-				return true;
-			parent = it->second.parent;
-		}
-		return false;
-	}
-
-	InstanceHandle GetStartAncestor( InstanceHandle handle )
-	{
-		InstanceHandle result = 0;
-		EnterCriticalSection(&m_Lock);
-		auto it = m_Elements.find(handle);
-		if (it != m_Elements.end())
-		{
-			InstanceHandle parent = it->second.parent;
-			for (int depth = 0; depth < 24 && parent; depth++)
-			{
-				auto pit = m_Elements.find(parent);
-				if (pit == m_Elements.end())
-					break;
-				if (pit->second.isStartControl)
-				{
-					result = parent;
-					break;
-				}
-				parent = pit->second.parent;
-			}
-		}
-		LeaveCriticalSection(&m_Lock);
-		return result;
-	}
-
 	static void FreeProperties( PropertyChainSource *sources, unsigned int sourceCount,
 		PropertyChainValue *values, unsigned int valueCount )
 	{
@@ -496,6 +498,212 @@ private:
 			}
 			CoTaskMemFree(values);
 		}
+	}
+
+	static HWND FindTaskbarAncestor( HWND hwnd )
+	{
+		for (HWND current = hwnd; current; current = GetParent(current))
+		{
+			wchar_t className[64] = {};
+			if (GetClassName(current, className, _countof(className)) &&
+				(_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+				 _wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0))
+			{
+				return current;
+			}
+		}
+		return NULL;
+	}
+
+	bool GetHostHandles( InstanceHandle startHandle, InstanceHandle *rootHandle, InstanceHandle *sourceHandle )
+	{
+		*rootHandle = 0;
+		*sourceHandle = 0;
+
+		// Snapshot the ancestor chain while holding the element-map lock. Never
+		// call XAML/COM while this lock is held: diagnostics callbacks can be
+		// re-entrant on the XAML thread.
+		std::vector<std::pair<InstanceHandle, InstanceHandle>> ancestors;
+		EnterCriticalSection(&m_Lock);
+		auto current = m_Elements.find(startHandle);
+		if (current != m_Elements.end())
+		{
+			InstanceHandle child = startHandle;
+			InstanceHandle parent = current->second.parent;
+			for (int depth = 0; depth < 48 && parent; depth++)
+			{
+				ancestors.push_back(std::make_pair(child, parent));
+				auto it = m_Elements.find(parent);
+				if (it == m_Elements.end())
+					break;
+				child = parent;
+				parent = it->second.parent;
+			}
+		}
+		LeaveCriticalSection(&m_Lock);
+
+		for (size_t i = 0; i < ancestors.size(); i++)
+		{
+			CComPtr<IInspectable> inspectable;
+			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(ancestors[i].second, &inspectable)) ||
+				!inspectable)
+			{
+				continue;
+			}
+
+			CComPtr<IOpenShellDesktopWindowXamlSourceNative> nativeSource;
+			if (SUCCEEDED(inspectable->QueryInterface(__uuidof(IOpenShellDesktopWindowXamlSourceNative),
+				(void**)&nativeSource)) && nativeSource)
+			{
+				*rootHandle = ancestors[i].first;
+				*sourceHandle = ancestors[i].second;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool CalculateStartRect( InstanceHandle startHandle, HWND *taskbar, RECT *rect )
+	{
+		*taskbar = NULL;
+		SetRectEmpty(rect);
+		if (!m_Diagnostics)
+			return false;
+
+		InstanceHandle rootHandle = 0;
+		InstanceHandle sourceHandle = 0;
+		if (!GetHostHandles(startHandle, &rootHandle, &sourceHandle))
+			return false;
+
+		CComPtr<IInspectable> startInspectable;
+		CComPtr<IInspectable> rootInspectable;
+		CComPtr<IInspectable> sourceInspectable;
+		if (FAILED(m_Diagnostics->GetIInspectableFromHandle(startHandle, &startInspectable)) ||
+			FAILED(m_Diagnostics->GetIInspectableFromHandle(rootHandle, &rootInspectable)) ||
+			FAILED(m_Diagnostics->GetIInspectableFromHandle(sourceHandle, &sourceInspectable)) ||
+			!startInspectable || !rootInspectable || !sourceInspectable)
+		{
+			return false;
+		}
+
+		CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> startFramework;
+		CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> rootFramework;
+		CComPtr<ABI::Windows::UI::Xaml::IUIElement> startElement;
+		CComPtr<ABI::Windows::UI::Xaml::IUIElement> rootElement;
+		CComPtr<IOpenShellDesktopWindowXamlSourceNative> nativeSource;
+
+		if (FAILED(startInspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IFrameworkElement), (void**)&startFramework)) ||
+			FAILED(startInspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement), (void**)&startElement)) ||
+			FAILED(rootInspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IFrameworkElement), (void**)&rootFramework)) ||
+			FAILED(rootInspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement), (void**)&rootElement)) ||
+			FAILED(sourceInspectable->QueryInterface(__uuidof(IOpenShellDesktopWindowXamlSourceNative), (void**)&nativeSource)) ||
+			!startFramework || !rootFramework || !startElement || !rootElement || !nativeSource)
+		{
+			return false;
+		}
+
+		double startWidth = 0, startHeight = 0, rootWidth = 0, rootHeight = 0;
+		if (FAILED(startFramework->get_ActualWidth(&startWidth)) ||
+			FAILED(startFramework->get_ActualHeight(&startHeight)) ||
+			FAILED(rootFramework->get_ActualWidth(&rootWidth)) ||
+			FAILED(rootFramework->get_ActualHeight(&rootHeight)) ||
+			startWidth <= 0 || startHeight <= 0 || rootWidth <= 0 || rootHeight <= 0)
+		{
+			return false;
+		}
+
+		CComPtr<ABI::Windows::UI::Xaml::Media::IGeneralTransform> transform;
+		if (FAILED(startElement->TransformToVisual(rootElement.p, &transform)) || !transform)
+			return false;
+
+		ABI::Windows::Foundation::Point origin = {};
+		ABI::Windows::Foundation::Point translated = {};
+		if (FAILED(transform->TransformPoint(origin, &translated)))
+			return false;
+
+		HWND sourceWindow = NULL;
+		if (FAILED(nativeSource->get_WindowHandle(&sourceWindow)) || !sourceWindow)
+			return false;
+
+		RECT client = {};
+		if (!GetClientRect(sourceWindow, &client))
+			return false;
+		int clientWidth = client.right - client.left;
+		int clientHeight = client.bottom - client.top;
+		if (clientWidth <= 0 || clientHeight <= 0)
+			return false;
+
+		POINT screenOrigin = {};
+		if (!ClientToScreen(sourceWindow, &screenOrigin))
+			return false;
+
+		const double scaleX = clientWidth / rootWidth;
+		const double scaleY = clientHeight / rootHeight;
+
+		// The DesktopWindowXamlSource client and its root content should differ
+		// only by DPI scaling. Reject inconsistent geometry instead of feeding
+		// a bad anchor into the taskbar positioning code.
+		const double scaleDelta = scaleX>scaleY ? scaleX-scaleY : scaleY-scaleX;
+		if (scaleX < 0.5 || scaleX > 5.0 || scaleY < 0.5 || scaleY > 5.0 ||
+			scaleDelta > 0.05)
+		{
+			return false;
+		}
+
+		rect->left = screenOrigin.x + (LONG)(translated.X * scaleX + 0.5);
+		rect->top = screenOrigin.y + (LONG)(translated.Y * scaleY + 0.5);
+		rect->right = rect->left + (LONG)(startWidth * scaleX + 0.5);
+		rect->bottom = rect->top + (LONG)(startHeight * scaleY + 0.5);
+
+		*taskbar = FindTaskbarAncestor(sourceWindow);
+		return *taskbar != NULL && rect->right > rect->left && rect->bottom > rect->top;
+	}
+
+	void RefreshStartRects( const std::vector<std::pair<InstanceHandle, StartElement>> &elements )
+	{
+		std::unordered_map<HWND, RECT> fresh;
+		for (size_t i = 0; i < elements.size(); i++)
+		{
+			if (!elements[i].second.isStartControl)
+				continue;
+
+			HWND taskbar = NULL;
+			RECT rect = {};
+			if (CalculateStartRect(elements[i].first, &taskbar, &rect))
+				fresh[taskbar] = rect;
+		}
+
+		std::vector<HWND> changed;
+		EnterCriticalSection(&m_Lock);
+		for (auto it = fresh.begin(); it != fresh.end(); ++it)
+		{
+			auto old = m_StartRects.find(it->first);
+			if (old == m_StartRects.end() || !EqualRect(&old->second, &it->second))
+				changed.push_back(it->first);
+		}
+		m_StartRects.swap(fresh);
+		LeaveCriticalSection(&m_Lock);
+
+		UINT message = GetWin11StartButtonRectChangedMessage();
+		if (message)
+		{
+			for (size_t i = 0; i < changed.size(); i++)
+				PostMessage(changed[i], message, 0, 0);
+		}
+	}
+
+	bool CopyStartRect( HWND taskbar, RECT *rect )
+	{
+		bool found = false;
+		EnterCriticalSection(&m_Lock);
+		auto it = m_StartRects.find(taskbar);
+		if (it != m_StartRects.end())
+		{
+			*rect = it->second;
+			found = true;
+		}
+		LeaveCriticalSection(&m_Lock);
+		return found;
 	}
 
 	InstanceHandle FindPrimaryStartLocked( void ) const
@@ -627,14 +835,14 @@ private:
 		return m_Visual->ClearProperty(handle, index);
 	}
 
-	void SetOverrideFlags( InstanceHandle handle, bool *visibility, bool *hitTest )
+	void SetOverrideFlags( InstanceHandle handle, bool *opacity, bool *hitTest )
 	{
 		EnterCriticalSection(&m_Lock);
 		auto it = m_Elements.find(handle);
 		if (it != m_Elements.end())
 		{
-			if (visibility)
-				it->second.visibilityOverride = *visibility;
+			if (opacity)
+				it->second.opacityOverride = *opacity;
 			if (hitTest)
 				it->second.hitTestOverride = *hitTest;
 		}
@@ -675,6 +883,8 @@ private:
 		primaryStart = m_PrimaryStart;
 		LeaveCriticalSection(&m_Lock);
 
+		RefreshStartRects(elements);
+
 		const bool allTaskbars = GetSettingBool(L"AllTaskbars");
 
 		for (size_t i = 0; i < elements.size(); i++)
@@ -687,6 +897,19 @@ private:
 				bool target = allTaskbars || !primaryStart || handle == primaryStart;
 				if (enabled && target)
 				{
+					// Keep the native control in layout so Windows keeps the
+					// centered taskbar group stable, but hide its visual and
+					// input surface. The Open-Shell HWND is positioned from the
+					// cached XAML rectangle captured above.
+					if (!record.opacityOverride)
+					{
+						HRESULT hr = SetPropertyText(handle, L"Opacity", L"0");
+						if (SUCCEEDED(hr))
+						{
+							bool value = true;
+							SetOverrideFlags(handle, &value, NULL);
+						}
+					}
 					if (!record.hitTestOverride)
 					{
 						HRESULT hr = SetPropertyText(handle, L"IsHitTestVisible", L"False");
@@ -697,47 +920,30 @@ private:
 						}
 					}
 				}
-				else if (record.hitTestOverride)
+				else
 				{
-					HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
-					if (SUCCEEDED(hr))
+					if (record.opacityOverride)
 					{
-						bool value = false;
-						SetOverrideFlags(handle, NULL, &value);
+						HRESULT hr = ClearPropertyByName(handle, L"Opacity");
+						if (SUCCEEDED(hr))
+						{
+							bool value = false;
+							SetOverrideFlags(handle, &value, NULL);
+						}
+					}
+					if (record.hitTestOverride)
+					{
+						HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
+						if (SUCCEEDED(hr))
+						{
+							bool value = false;
+							SetOverrideFlags(handle, NULL, &value);
+						}
 					}
 				}
 				continue;
 			}
 
-			if (!IsStartGlyph(record))
-				continue;
-
-			InstanceHandle startAncestor = GetStartAncestor(handle);
-			if (!startAncestor)
-				continue;
-			bool target = allTaskbars || !primaryStart || startAncestor == primaryStart;
-
-			if (enabled && target)
-			{
-				if (!record.visibilityOverride)
-				{
-					HRESULT hr = SetPropertyText(handle, L"Visibility", L"Collapsed");
-					if (SUCCEEDED(hr))
-					{
-						bool value = true;
-						SetOverrideFlags(handle, &value, NULL);
-					}
-				}
-			}
-			else if (record.visibilityOverride)
-			{
-				HRESULT hr = ClearPropertyByName(handle, L"Visibility");
-				if (SUCCEEDED(hr))
-				{
-					bool value = false;
-					SetOverrideFlags(handle, &value, NULL);
-				}
-			}
 		}
 	}
 
@@ -747,10 +953,17 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
 	bool m_InjectionReferenceBalanced;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
+	std::unordered_map<HWND, RECT> m_StartRects;
+public:
+	bool GetCachedStartRect( HWND taskbar, RECT *rect )
+	{
+		return taskbar && rect && CopyStartRect(taskbar, rect);
+	}
 };
 
 static CWin11StartButtonTap *GetTapRef( void )
@@ -871,30 +1084,38 @@ static DWORD WINAPI ConnectThread( LPVOID param )
 	if (!module || !GetModuleFileName(module, dllPath, _countof(dllPath)))
 		return FinishConnectThread(moduleReference, runtime, true);
 
-	const wchar_t *endpoints[] = { L"VisualDiagConnection1", L"VisualDiagConnection2" };
 	HRESULT last = E_FAIL;
-	for (int retry = 0; retry < 8 && InterlockedCompareExchange(&g_StartButtonActive, 0, 0); retry++)
+	for (int connection = 1; connection <= 60 &&
+		InterlockedCompareExchange(&g_StartButtonActive, 0, 0); connection++)
 	{
-		for (int i = 0; i < _countof(endpoints); i++)
-		{
-			ConnectAttempt attempt = {};
-			attempt.init = init;
-			attempt.endpoint = endpoints[i];
-			Strcpy(attempt.dllPath, _countof(attempt.dllPath), dllPath);
-			attempt.hr = E_FAIL;
+		wchar_t endpoint[64];
+		_snwprintf_s(endpoint, _countof(endpoint), _TRUNCATE, L"VisualDiagConnection%d", connection);
 
-			HANDLE thread = CreateThread(NULL, 0, ConnectAttemptThread, &attempt, 0, NULL);
-			if (!thread)
-				continue;
-			WaitForSingleObject(thread, INFINITE);
-			CloseHandle(thread);
-			last = attempt.hr;
-			if (SUCCEEDED(last))
-			{
-				LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoints[i]);
-				return FinishConnectThread(moduleReference, runtime, false);
-			}
+		// XAML Diagnostics can only be initialized once per thread. Match the
+		// proven TranslucentTB strategy: each connection name gets a fresh
+		// worker thread and we keep advancing names instead of assuming 1/2.
+		ConnectAttempt attempt = {};
+		attempt.init = init;
+		attempt.endpoint = endpoint;
+		Strcpy(attempt.dllPath, _countof(attempt.dllPath), dllPath);
+		attempt.hr = E_FAIL;
+
+		HANDLE thread = CreateThread(NULL, 0, ConnectAttemptThread, &attempt, 0, NULL);
+		if (!thread)
+		{
+			last = HRESULT_FROM_WIN32(GetLastError());
+			continue;
 		}
+
+		WaitForSingleObject(thread, INFINITE);
+		CloseHandle(thread);
+		last = attempt.hr;
+		if (SUCCEEDED(last))
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoint);
+			return FinishConnectThread(moduleReference, runtime, false);
+		}
+
 		Sleep(500);
 	}
 
@@ -973,4 +1194,19 @@ void StopWin11StartButtonMonitor( void )
 			LogToFile(STARTUP_LOG, L"Win11StartButton: TAP shutdown failed 0x%08X", hr);
 		tap->Release();
 	}
+}
+
+
+bool GetWin11StartButtonRect( HWND taskbar, RECT *rect )
+{
+	if (!IsWin11() || !taskbar || !rect)
+		return false;
+
+	CWin11StartButtonTap *tap = GetTapRef();
+	if (!tap)
+		return false;
+
+	bool found = tap->GetCachedStartRect(taskbar, rect);
+	tap->Release();
+	return found;
 }
