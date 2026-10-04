@@ -159,6 +159,8 @@ public:
 			m_Advised = false;
 		}
 		m_Visual.Release();
+		m_Diagnostics.Release();
+		m_AutomationProperties.Release();
 		m_Site.Release();
 
 		if (!site)
@@ -205,10 +207,14 @@ public:
 			return hr;
 		}
 
+		site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+
 		if (!CreateDispatchWindow())
 		{
 			DWORD error = GetLastError();
 			m_Visual.Release();
+			m_Diagnostics.Release();
+			m_AutomationProperties.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -241,6 +247,8 @@ public:
 				DestroyWindow(dispatch);
 			}
 			m_Visual.Release();
+			m_Diagnostics.Release();
+			m_AutomationProperties.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -386,6 +394,8 @@ private:
 		}
 
 		m_Visual.Release();
+		m_Diagnostics.Release();
+		m_AutomationProperties.Release();
 		m_Site.Release();
 
 		if (m_Dispatch)
@@ -751,6 +761,8 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
+	CComPtr<ABI::Windows::UI::Xaml::Automation::IAutomationPropertiesStatics> m_AutomationProperties;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
 	bool m_InjectionReferenceBalanced;
