@@ -3624,6 +3624,12 @@ static LRESULT CALLBACK HookProgManThread( int code, WPARAM wParam, LPARAM lPara
 // WH_MOUSE hook for taskbar thread (Win11+)
 static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM lParam)
 {
+	// Research-only escape hatch: holding F12 lets the native XAML Start
+	// control receive pointer input so the TAP pointer probe can record the
+	// actual routed event sequence. Normal behavior is unchanged.
+	if (GetAsyncKeyState(VK_F12) & 0x8000)
+		return CallNextHookEx(NULL, code, wParam, lParam);
+
 	if (code == HC_ACTION)
 	{
 		// we need to steal mouse messages that are issues in start button area
