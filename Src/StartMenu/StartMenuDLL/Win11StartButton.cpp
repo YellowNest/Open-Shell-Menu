@@ -13,8 +13,12 @@
 #include "ResourceHelper.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.UI.Xaml.Automation.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <roapi.h>
+
+#pragma comment(lib, "runtimeobject.lib")
 #include <unordered_map>
 #include <vector>
 
