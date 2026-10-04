@@ -882,7 +882,8 @@ static DWORD WINAPI ConnectThread( LPVOID param )
 		connection++)
 	{
 		wchar_t endpoint[64];
-		Sprintf(endpoint, _countof(endpoint), L"VisualDiagConnection%d", connection);
+		_snwprintf_s(endpoint, _countof(endpoint), _TRUNCATE,
+			L"VisualDiagConnection%d", connection);
 
 		ConnectAttempt attempt = {};
 		attempt.init = init;
