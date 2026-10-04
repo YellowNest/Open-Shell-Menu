@@ -13,9 +13,14 @@
 #include "ResourceHelper.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.UI.Xaml.Automation.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <roapi.h>
+#include <winstring.h>
 #include <unordered_map>
+
+#pragma comment(lib, "runtimeobject.lib")
 #include <vector>
 
 static const GUID CLSID_OpenShellStartButtonTap =
@@ -156,6 +161,8 @@ public:
 			m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
 			m_Advised = false;
 		}
+		m_AutomationProperties.Release();
+		m_Diagnostics.Release();
 		m_Visual.Release();
 		m_Site.Release();
 
@@ -203,9 +210,14 @@ public:
 			return hr;
 		}
 
+		HRESULT diagnosticsHr = site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+		LogToFile(STARTUP_LOG, L"Win11StartButton: XamlDiagnostics 0x%08X", diagnosticsHr);
+
 		if (!CreateDispatchWindow())
 		{
 			DWORD error = GetLastError();
+			m_AutomationProperties.Release();
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
@@ -238,6 +250,8 @@ public:
 				SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
 				DestroyWindow(dispatch);
 			}
+			m_AutomationProperties.Release();
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
@@ -385,6 +399,8 @@ private:
 			m_Advised = false;
 		}
 
+		m_AutomationProperties.Release();
+		m_Diagnostics.Release();
 		m_Visual.Release();
 		m_Site.Release();
 
@@ -519,18 +535,84 @@ private:
 		return primary;
 	}
 
+	HRESULT EnsureAutomationProperties( void )
+	{
+		if (m_AutomationProperties)
+			return S_OK;
+
+		static const wchar_t classNameText[] = L"Windows.UI.Xaml.Automation.AutomationProperties";
+		HSTRING className = NULL;
+		HRESULT hr = WindowsCreateString(classNameText, (UINT32)_countof(classNameText) - 1, &className);
+		if (FAILED(hr))
+			return hr;
+
+		hr = RoGetActivationFactory(className,
+			__uuidof(ABI::Windows::UI::Xaml::Automation::IAutomationPropertiesStatics),
+			(void**)&m_AutomationProperties);
+		WindowsDeleteString(className);
+		return hr;
+	}
+
+	HRESULT ResolveAutomationIdDirect( InstanceHandle handle, CString *automationId )
+	{
+		automationId->Empty();
+		if (!m_Diagnostics)
+			return E_NOINTERFACE;
+
+		CComPtr<IInspectable> inspectable;
+		HRESULT hr = m_Diagnostics->GetIInspectableFromHandle(handle, &inspectable);
+		if (FAILED(hr) || !inspectable)
+			return FAILED(hr) ? hr : E_FAIL;
+
+		CComPtr<ABI::Windows::UI::Xaml::IDependencyObject> dependencyObject;
+		hr = inspectable->QueryInterface(
+			__uuidof(ABI::Windows::UI::Xaml::IDependencyObject),
+			(void**)&dependencyObject);
+		if (FAILED(hr) || !dependencyObject)
+			return FAILED(hr) ? hr : E_NOINTERFACE;
+
+		hr = EnsureAutomationProperties();
+		if (FAILED(hr) || !m_AutomationProperties)
+			return FAILED(hr) ? hr : E_NOINTERFACE;
+
+		HSTRING value = NULL;
+		hr = m_AutomationProperties->GetAutomationId(dependencyObject, &value);
+		if (SUCCEEDED(hr) && value)
+		{
+			UINT32 length = 0;
+			const wchar_t *text = WindowsGetStringRawBuffer(value, &length);
+			if (text && length)
+				automationId->SetString(text, (int)length);
+		}
+		if (value)
+			WindowsDeleteString(value);
+		return hr;
+	}
+
 	HRESULT ResolveStartControl( InstanceHandle handle, const StartElement &element, bool *isStartControl )
 	{
 		*isStartControl = false;
 		if (!IsStartControlCandidate(element))
 			return S_OK;
 
-		// Older taskbar implementations may expose a distinct x:Name.
 		if (element.name.CompareNoCase(L"StartButton") == 0)
 		{
 			*isStartControl = true;
 			return S_OK;
 		}
+
+		CString directId;
+		HRESULT directHr = ResolveAutomationIdDirect(handle, &directId);
+		if (SUCCEEDED(directHr))
+		{
+			*isStartControl = directId.CompareNoCase(L"StartButton") == 0;
+			LogToFile(STARTUP_LOG, L"Win11StartButton: direct AutomationId '%s' start=%d",
+				(LPCWSTR)directId, *isStartControl ? 1 : 0);
+			return S_OK;
+		}
+
+		LogToFile(STARTUP_LOG, L"Win11StartButton: direct AutomationId failed 0x%08X; using property-chain fallback",
+			directHr);
 
 		unsigned int sourceCount = 0;
 		unsigned int valueCount = 0;
@@ -779,6 +861,8 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
+	CComPtr<ABI::Windows::UI::Xaml::Automation::IAutomationPropertiesStatics> m_AutomationProperties;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
 	bool m_InjectionReferenceBalanced;
