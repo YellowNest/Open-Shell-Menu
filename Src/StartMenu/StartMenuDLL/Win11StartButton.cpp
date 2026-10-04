@@ -13,8 +13,14 @@
 #include "ResourceHelper.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.UI.Xaml.Input.h>
+#include <Windows.UI.Input.h>
+#include <Windows.Devices.Input.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <roapi.h>
+
+#pragma comment(lib, "runtimeobject.lib")
 #include <unordered_map>
 #include <vector>
 
@@ -58,6 +64,98 @@ struct StartElement
 };
 
 class CWin11StartButtonTap;
+
+enum StartPointerProbeEvent
+{
+	START_POINTER_PRESSED,
+	START_POINTER_RELEASED,
+	START_POINTER_CANCELED,
+	START_POINTER_CAPTURE_LOST,
+};
+
+class CStartPointerProbeHandler:
+	public IInspectable,
+	public ABI::Windows::UI::Xaml::Input::IPointerEventHandler
+{
+public:
+	CStartPointerProbeHandler( CWin11StartButtonTap *owner, StartPointerProbeEvent eventType )
+	{
+		m_Refs = 1;
+		m_Owner = owner;
+		m_EventType = eventType;
+	}
+
+	STDMETHODIMP QueryInterface( REFIID riid, void **ppv )
+	{
+		if (!ppv)
+			return E_POINTER;
+		*ppv = NULL;
+
+		if (riid == IID_IUnknown || riid == IID_IInspectable)
+			*ppv = static_cast<IInspectable*>(this);
+		else if (riid == __uuidof(ABI::Windows::UI::Xaml::Input::IPointerEventHandler))
+			*ppv = static_cast<ABI::Windows::UI::Xaml::Input::IPointerEventHandler*>(this);
+		else
+			return E_NOINTERFACE;
+
+		AddRef();
+		return S_OK;
+	}
+
+	STDMETHODIMP_(ULONG) AddRef( void )
+	{
+		return (ULONG)InterlockedIncrement(&m_Refs);
+	}
+
+	STDMETHODIMP_(ULONG) Release( void )
+	{
+		LONG refs = InterlockedDecrement(&m_Refs);
+		if (!refs)
+			delete this;
+		return (ULONG)refs;
+	}
+
+	STDMETHODIMP GetIids( ULONG *iidCount, IID **iids )
+	{
+		if (!iidCount || !iids)
+			return E_POINTER;
+
+		*iidCount = 1;
+		*iids = (IID*)CoTaskMemAlloc(sizeof(IID));
+		if (!*iids)
+		{
+			*iidCount = 0;
+			return E_OUTOFMEMORY;
+		}
+		(*iids)[0] = __uuidof(ABI::Windows::UI::Xaml::Input::IPointerEventHandler);
+		return S_OK;
+	}
+
+	STDMETHODIMP GetRuntimeClassName( HSTRING *className )
+	{
+		if (!className)
+			return E_POINTER;
+		*className = NULL;
+		return S_OK;
+	}
+
+	STDMETHODIMP GetTrustLevel( TrustLevel *trustLevel )
+	{
+		if (!trustLevel)
+			return E_POINTER;
+		*trustLevel = BaseTrust;
+		return S_OK;
+	}
+
+	STDMETHODIMP Invoke( IInspectable *sender,
+		ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args );
+
+private:
+	LONG m_Refs;
+	CWin11StartButtonTap *m_Owner;
+	StartPointerProbeEvent m_EventType;
+};
+
 static CWin11StartButtonTap *g_Tap = NULL;
 static SRWLOCK g_TapLock = SRWLOCK_INIT;
 
@@ -95,6 +193,7 @@ public:
 		m_Advised = false;
 		m_Dispatch = NULL;
 		m_PrimaryStart = 0;
+		m_ProbeStart = 0;
 		m_NextDiscoveryOrder = 0;
 		m_InjectionReferenceBalanced = false;
 		InitializeCriticalSection(&m_Lock);
@@ -154,7 +253,10 @@ public:
 			m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
 			m_Advised = false;
 		}
+		DetachPointerProbe();
 		m_Visual.Release();
+		m_Diagnostics.Release();
+		m_UIElementStatics.Release();
 		m_Site.Release();
 
 		if (!site)
@@ -200,6 +302,12 @@ public:
 		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
 		if (FAILED(hr) || !m_Visual)
 			return hr;
+
+		// IXamlDiagnostics lets the TAP turn visual-tree handles back into the
+		// actual XAML objects. Keep this optional so the existing visual
+		// suppression still works if a future build stops exposing it.
+		HRESULT diagnosticsHr = site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+		LogToFile(STARTUP_LOG, L"Win11StartButton: IXamlDiagnostics 0x%08X", diagnosticsHr);
 
 		if (!CreateDispatchWindow())
 			return HRESULT_FROM_WIN32(GetLastError());
@@ -305,6 +413,10 @@ public:
 			g_Tap = NULL;
 		ReleaseSRWLockExclusive(&g_TapLock);
 
+		// Pointer handlers are attached to live XAML objects and must be removed
+		// before the visual-tree callback/site is detached.
+		DetachPointerProbe();
+
 		// Restore the native XAML state before detaching the callback.
 		RequestApply(true);
 
@@ -325,6 +437,8 @@ public:
 		}
 
 		m_Visual.Release();
+		m_Diagnostics.Release();
+		m_UIElementStatics.Release();
 		m_Site.Release();
 		InterlockedExchange(&g_ConnectStarted, 0);
 
@@ -592,6 +706,171 @@ private:
 		LeaveCriticalSection(&m_Lock);
 	}
 
+	HRESULT EnsureUIElementStatics( void )
+	{
+		if (m_UIElementStatics)
+			return S_OK;
+
+		HSTRING className = NULL;
+		const wchar_t runtimeClass[] = L"Windows.UI.Xaml.UIElement";
+		HRESULT hr = WindowsCreateString(runtimeClass, (UINT32)_countof(runtimeClass) - 1, &className);
+		if (FAILED(hr))
+			return hr;
+
+		hr = RoGetActivationFactory(className, __uuidof(ABI::Windows::UI::Xaml::IUIElementStatics),
+			(void**)&m_UIElementStatics);
+		WindowsDeleteString(className);
+		return hr;
+	}
+
+	HRESULT CreatePointerProbeHandler( StartPointerProbeEvent eventType, CComPtr<IInspectable> &handler )
+	{
+		CStartPointerProbeHandler *probe = new CStartPointerProbeHandler(this, eventType);
+		if (!probe)
+			return E_OUTOFMEMORY;
+		HRESULT hr = probe->QueryInterface(IID_IInspectable, (void**)&handler);
+		probe->Release();
+		return hr;
+	}
+
+	void DetachPointerProbe( void )
+	{
+		if (m_ProbeElement)
+		{
+			if (m_ProbePressedEvent && m_ProbePressedHandler)
+				m_ProbeElement->RemoveHandler(m_ProbePressedEvent, m_ProbePressedHandler);
+			if (m_ProbeReleasedEvent && m_ProbeReleasedHandler)
+				m_ProbeElement->RemoveHandler(m_ProbeReleasedEvent, m_ProbeReleasedHandler);
+			if (m_ProbeCanceledEvent && m_ProbeCanceledHandler)
+				m_ProbeElement->RemoveHandler(m_ProbeCanceledEvent, m_ProbeCanceledHandler);
+			if (m_ProbeCaptureLostEvent && m_ProbeCaptureLostHandler)
+				m_ProbeElement->RemoveHandler(m_ProbeCaptureLostEvent, m_ProbeCaptureLostHandler);
+		}
+
+		m_ProbePressedHandler.Release();
+		m_ProbeReleasedHandler.Release();
+		m_ProbeCanceledHandler.Release();
+		m_ProbeCaptureLostHandler.Release();
+		m_ProbePressedEvent.Release();
+		m_ProbeReleasedEvent.Release();
+		m_ProbeCanceledEvent.Release();
+		m_ProbeCaptureLostEvent.Release();
+		m_ProbeElement.Release();
+		m_ProbeStart = 0;
+	}
+
+	HRESULT AttachPointerProbe( InstanceHandle startHandle )
+	{
+		if (!startHandle || !m_Diagnostics)
+			return E_NOINTERFACE;
+		if (m_ProbeStart == startHandle && m_ProbeElement)
+			return S_OK;
+
+		DetachPointerProbe();
+
+		CComPtr<IInspectable> inspectable;
+		HRESULT hr = m_Diagnostics->GetIInspectableFromHandle(startHandle, &inspectable);
+		if (FAILED(hr) || !inspectable)
+			return FAILED(hr) ? hr : E_FAIL;
+
+		hr = inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement),
+			(void**)&m_ProbeElement);
+		if (FAILED(hr) || !m_ProbeElement)
+			return FAILED(hr) ? hr : E_NOINTERFACE;
+
+		hr = EnsureUIElementStatics();
+		if (FAILED(hr))
+		{
+			DetachPointerProbe();
+			return hr;
+		}
+
+		if (FAILED(hr = m_UIElementStatics->get_PointerPressedEvent(&m_ProbePressedEvent)) ||
+			FAILED(hr = m_UIElementStatics->get_PointerReleasedEvent(&m_ProbeReleasedEvent)) ||
+			FAILED(hr = m_UIElementStatics->get_PointerCanceledEvent(&m_ProbeCanceledEvent)) ||
+			FAILED(hr = m_UIElementStatics->get_PointerCaptureLostEvent(&m_ProbeCaptureLostEvent)) ||
+			FAILED(hr = CreatePointerProbeHandler(START_POINTER_PRESSED, m_ProbePressedHandler)) ||
+			FAILED(hr = CreatePointerProbeHandler(START_POINTER_RELEASED, m_ProbeReleasedHandler)) ||
+			FAILED(hr = CreatePointerProbeHandler(START_POINTER_CANCELED, m_ProbeCanceledHandler)) ||
+			FAILED(hr = CreatePointerProbeHandler(START_POINTER_CAPTURE_LOST, m_ProbeCaptureLostHandler)))
+		{
+			DetachPointerProbe();
+			return hr;
+		}
+
+		// handledEventsToo is intentional. ButtonBase class handling normally
+		// consumes PointerPressed before ordinary instance handlers see it.
+		if (FAILED(hr = m_ProbeElement->AddHandler(m_ProbePressedEvent, m_ProbePressedHandler, TRUE)) ||
+			FAILED(hr = m_ProbeElement->AddHandler(m_ProbeReleasedEvent, m_ProbeReleasedHandler, TRUE)) ||
+			FAILED(hr = m_ProbeElement->AddHandler(m_ProbeCanceledEvent, m_ProbeCanceledHandler, TRUE)) ||
+			FAILED(hr = m_ProbeElement->AddHandler(m_ProbeCaptureLostEvent, m_ProbeCaptureLostHandler, TRUE)))
+		{
+			DetachPointerProbe();
+			return hr;
+		}
+
+		m_ProbeStart = startHandle;
+		LogToFile(STARTUP_LOG, L"Win11StartButton: pointer probe attached handle=%llu",
+			(unsigned long long)startHandle);
+		return S_OK;
+	}
+
+	HRESULT OnPointerProbe( StartPointerProbeEvent eventType,
+		ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args )
+	{
+		if (!args || !m_ProbeElement)
+			return S_OK;
+
+		CComPtr<ABI::Windows::UI::Input::IPointerPoint> point;
+		HRESULT hr = args->GetCurrentPoint(m_ProbeElement, &point);
+		if (FAILED(hr) || !point)
+			return S_OK;
+
+		UINT32 pointerId = 0;
+		ABI::Windows::Foundation::Point position = {};
+		boolean inContact = false;
+		boolean handled = false;
+		int deviceType = -1;
+		boolean left = false, right = false, middle = false, barrel = false;
+
+		point->get_PointerId(&pointerId);
+		point->get_Position(&position);
+		point->get_IsInContact(&inContact);
+		args->get_Handled(&handled);
+
+		CComPtr<ABI::Windows::Devices::Input::IPointerDevice> device;
+		if (SUCCEEDED(point->get_PointerDevice(&device)) && device)
+		{
+			ABI::Windows::Devices::Input::PointerDeviceType type;
+			if (SUCCEEDED(device->get_PointerDeviceType(&type)))
+				deviceType = (int)type;
+		}
+
+		CComPtr<ABI::Windows::UI::Input::IPointerPointProperties> properties;
+		if (SUCCEEDED(point->get_Properties(&properties)) && properties)
+		{
+			properties->get_IsLeftButtonPressed(&left);
+			properties->get_IsRightButtonPressed(&right);
+			properties->get_IsMiddleButtonPressed(&middle);
+			properties->get_IsBarrelButtonPressed(&barrel);
+		}
+
+		const wchar_t *eventName = L"unknown";
+		switch (eventType)
+		{
+			case START_POINTER_PRESSED: eventName = L"pressed"; break;
+			case START_POINTER_RELEASED: eventName = L"released"; break;
+			case START_POINTER_CANCELED: eventName = L"canceled"; break;
+			case START_POINTER_CAPTURE_LOST: eventName = L"capture-lost"; break;
+		}
+
+		LogToFile(STARTUP_LOG,
+			L"Win11StartButton: pointer probe %s device=%d id=%u handled=%d contact=%d pos=%.1f,%.1f buttons=%d/%d/%d barrel=%d",
+			eventName, deviceType, pointerId, (int)handled, (int)inContact,
+			position.X, position.Y, (int)left, (int)right, (int)middle, (int)barrel);
+		return S_OK;
+	}
+
 	void ApplyState( bool enabled )
 	{
 		if (!m_Visual)
@@ -625,6 +904,17 @@ private:
 		EnterCriticalSection(&m_Lock);
 		primaryStart = m_PrimaryStart;
 		LeaveCriticalSection(&m_Lock);
+
+		if (primaryStart)
+		{
+			HRESULT probeHr = AttachPointerProbe(primaryStart);
+			if (FAILED(probeHr))
+				LogToFile(STARTUP_LOG, L"Win11StartButton: pointer probe attach failed 0x%08X", probeHr);
+		}
+		else
+		{
+			DetachPointerProbe();
+		}
 
 		const bool allTaskbars = GetSettingBool(L"AllTaskbars");
 
@@ -698,11 +988,29 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
+	CComPtr<ABI::Windows::UI::Xaml::IUIElementStatics> m_UIElementStatics;
+	InstanceHandle m_ProbeStart;
+	CComPtr<ABI::Windows::UI::Xaml::IUIElement> m_ProbeElement;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_ProbePressedEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_ProbeReleasedEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_ProbeCanceledEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_ProbeCaptureLostEvent;
+	CComPtr<IInspectable> m_ProbePressedHandler;
+	CComPtr<IInspectable> m_ProbeReleasedHandler;
+	CComPtr<IInspectable> m_ProbeCanceledHandler;
+	CComPtr<IInspectable> m_ProbeCaptureLostHandler;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
 	bool m_InjectionReferenceBalanced;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
+
+STDMETHODIMP CStartPointerProbeHandler::Invoke( IInspectable *,
+	ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args )
+{
+	return m_Owner ? m_Owner->OnPointerProbe(m_EventType, args) : S_OK;
+}
 
 static CWin11StartButtonTap *GetTapRef( void )
 {
