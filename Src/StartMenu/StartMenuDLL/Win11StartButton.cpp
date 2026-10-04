@@ -871,30 +871,43 @@ static DWORD WINAPI ConnectThread( LPVOID param )
 	if (!module || !GetModuleFileName(module, dllPath, _countof(dllPath)))
 		return FinishConnectThread(moduleReference, runtime, true);
 
-	const wchar_t *endpoints[] = { L"VisualDiagConnection1", L"VisualDiagConnection2" };
 	HRESULT last = E_FAIL;
-	for (int retry = 0; retry < 8 && InterlockedCompareExchange(&g_StartButtonActive, 0, 0); retry++)
-	{
-		for (int i = 0; i < _countof(endpoints); i++)
-		{
-			ConnectAttempt attempt = {};
-			attempt.init = init;
-			attempt.endpoint = endpoints[i];
-			Strcpy(attempt.dllPath, _countof(attempt.dllPath), dllPath);
-			attempt.hr = E_FAIL;
 
-			HANDLE thread = CreateThread(NULL, 0, ConnectAttemptThread, &attempt, 0, NULL);
-			if (!thread)
-				continue;
-			WaitForSingleObject(thread, INFINITE);
-			CloseHandle(thread);
-			last = attempt.hr;
-			if (SUCCEEDED(last))
-			{
-				LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoints[i]);
-				return FinishConnectThread(moduleReference, runtime, false);
-			}
+	// Explorer can have more than two XAML diagnostics connections. The
+	// connection suffix increases as XAML islands/windows are created, and
+	// older connections can disappear. Established taskbar TAP clients scan a
+	// wider range instead of assuming Connection1/2.
+	for (int connection = 1;
+		connection <= 60 && InterlockedCompareExchange(&g_StartButtonActive, 0, 0);
+		connection++)
+	{
+		wchar_t endpoint[64];
+		Sprintf(endpoint, _countof(endpoint), L"VisualDiagConnection%d", connection);
+
+		ConnectAttempt attempt = {};
+		attempt.init = init;
+		attempt.endpoint = endpoint;
+		Strcpy(attempt.dllPath, _countof(attempt.dllPath), dllPath);
+		attempt.hr = E_FAIL;
+
+		// XAML diagnostics can only be initialized once per thread, so keep
+		// every connection attempt on a fresh short-lived worker.
+		HANDLE thread = CreateThread(NULL, 0, ConnectAttemptThread, &attempt, 0, NULL);
+		if (!thread)
+		{
+			last = HRESULT_FROM_WIN32(GetLastError());
+			continue;
 		}
+
+		WaitForSingleObject(thread, INFINITE);
+		CloseHandle(thread);
+		last = attempt.hr;
+		if (SUCCEEDED(last))
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoint);
+			return FinishConnectThread(moduleReference, runtime, false);
+		}
+
 		Sleep(500);
 	}
 
