@@ -60,7 +60,7 @@ jobs:
         run: Src\Setup\BuildBinaries.bat
 
       - name: Upload binaries
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' # Only manual master builds
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/research/win11-xaml-start-input-binaries' # Research artifact build only
         id: upload-binaries
         uses: actions/upload-artifact@v7
         with:
