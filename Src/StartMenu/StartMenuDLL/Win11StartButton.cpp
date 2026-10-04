@@ -41,6 +41,7 @@ struct StartElement
 	CString type;
 	CString name;
 	bool visibilityOverride;
+	bool opacityOverride;
 	bool hitTestOverride;
 	bool startControlResolved;
 	bool isStartControl;
@@ -50,6 +51,7 @@ struct StartElement
 	{
 		parent = 0;
 		visibilityOverride = false;
+		opacityOverride = false;
 		hitTestOverride = false;
 		startControlResolved = false;
 		isStartControl = false;
@@ -265,8 +267,9 @@ public:
 			auto it = m_Elements.find(element.Handle);
 			if (it != m_Elements.end())
 			{
-				interesting = it->second.visibilityOverride || it->second.hitTestOverride ||
-					it->second.isStartControl || IsStartControlCandidate(it->second);
+				interesting = it->second.visibilityOverride || it->second.opacityOverride ||
+					it->second.hitTestOverride || it->second.isStartControl ||
+					IsStartControlCandidate(it->second);
 				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
 				if (wasPrimary)
@@ -284,6 +287,7 @@ public:
 			if (previous != m_Elements.end())
 			{
 				record.visibilityOverride = previous->second.visibilityOverride;
+				record.opacityOverride = previous->second.opacityOverride;
 				record.hitTestOverride = previous->second.hitTestOverride;
 				record.startControlResolved = previous->second.startControlResolved;
 				record.isStartControl = previous->second.isStartControl;
@@ -627,7 +631,7 @@ private:
 		return m_Visual->ClearProperty(handle, index);
 	}
 
-	void SetOverrideFlags( InstanceHandle handle, bool *visibility, bool *hitTest )
+	void SetOverrideFlags( InstanceHandle handle, bool *visibility, bool *opacity, bool *hitTest )
 	{
 		EnterCriticalSection(&m_Lock);
 		auto it = m_Elements.find(handle);
@@ -635,6 +639,8 @@ private:
 		{
 			if (visibility)
 				it->second.visibilityOverride = *visibility;
+			if (opacity)
+				it->second.opacityOverride = *opacity;
 			if (hitTest)
 				it->second.hitTestOverride = *hitTest;
 		}
@@ -687,23 +693,49 @@ private:
 				bool target = allTaskbars || !primaryStart || handle == primaryStart;
 				if (enabled && target)
 				{
+					// Hide the verified Start control itself rather than depending
+					// on the internal glyph subtree. Opacity preserves the taskbar
+					// layout slot while remaining stable if Microsoft changes the
+					// icon implementation on a newer Windows build.
+					if (!record.opacityOverride)
+					{
+						HRESULT hr = SetPropertyText(handle, L"Opacity", L"0");
+						if (SUCCEEDED(hr))
+						{
+							bool value = true;
+							SetOverrideFlags(handle, NULL, &value, NULL);
+						}
+					}
+
 					if (!record.hitTestOverride)
 					{
 						HRESULT hr = SetPropertyText(handle, L"IsHitTestVisible", L"False");
 						if (SUCCEEDED(hr))
 						{
 							bool value = true;
-							SetOverrideFlags(handle, NULL, &value);
+							SetOverrideFlags(handle, NULL, NULL, &value);
 						}
 					}
 				}
-				else if (record.hitTestOverride)
+				else
 				{
-					HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
-					if (SUCCEEDED(hr))
+					if (record.opacityOverride)
 					{
-						bool value = false;
-						SetOverrideFlags(handle, NULL, &value);
+						HRESULT hr = ClearPropertyByName(handle, L"Opacity");
+						if (SUCCEEDED(hr))
+						{
+							bool value = false;
+							SetOverrideFlags(handle, NULL, &value, NULL);
+						}
+					}
+					if (record.hitTestOverride)
+					{
+						HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
+						if (SUCCEEDED(hr))
+						{
+							bool value = false;
+							SetOverrideFlags(handle, NULL, NULL, &value);
+						}
 					}
 				}
 				continue;
@@ -725,7 +757,7 @@ private:
 					if (SUCCEEDED(hr))
 					{
 						bool value = true;
-						SetOverrideFlags(handle, &value, NULL);
+						SetOverrideFlags(handle, &value, NULL, NULL);
 					}
 				}
 			}
@@ -735,7 +767,7 @@ private:
 				if (SUCCEEDED(hr))
 				{
 					bool value = false;
-					SetOverrideFlags(handle, &value, NULL);
+					SetOverrideFlags(handle, &value, NULL, NULL);
 				}
 			}
 		}
