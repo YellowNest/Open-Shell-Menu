@@ -529,6 +529,59 @@ private:
 		return primary;
 	}
 
+	HRESULT EnsureAutomationProperties( void )
+	{
+		if (m_AutomationProperties)
+			return S_OK;
+
+		HSTRING className = NULL;
+		const wchar_t runtimeClass[] = L"Windows.UI.Xaml.Automation.AutomationProperties";
+		HRESULT hr = WindowsCreateString(runtimeClass, (UINT32)_countof(runtimeClass)-1, &className);
+		if (FAILED(hr))
+			return hr;
+
+		hr = RoGetActivationFactory(className,
+			__uuidof(ABI::Windows::UI::Xaml::Automation::IAutomationPropertiesStatics),
+			(void**)&m_AutomationProperties);
+		WindowsDeleteString(className);
+		return hr;
+	}
+
+	HRESULT GetAutomationIdDirect( InstanceHandle handle, CString &automationId )
+	{
+		automationId.Empty();
+		if (!m_Diagnostics)
+			return E_NOINTERFACE;
+
+		CComPtr<IInspectable> inspectable;
+		HRESULT hr = m_Diagnostics->GetIInspectableFromHandle(handle, &inspectable);
+		if (FAILED(hr) || !inspectable)
+			return FAILED(hr) ? hr : E_FAIL;
+
+		CComPtr<ABI::Windows::UI::Xaml::IDependencyObject> dependencyObject;
+		hr = inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IDependencyObject),
+			(void**)&dependencyObject);
+		if (FAILED(hr) || !dependencyObject)
+			return FAILED(hr) ? hr : E_NOINTERFACE;
+
+		hr = EnsureAutomationProperties();
+		if (FAILED(hr))
+			return hr;
+
+		HSTRING value = NULL;
+		hr = m_AutomationProperties->GetAutomationId(dependencyObject, &value);
+		if (SUCCEEDED(hr) && value)
+		{
+			UINT32 length = 0;
+			const wchar_t *text = WindowsGetStringRawBuffer(value, &length);
+			if (text && length)
+				automationId.SetString(text, (int)length);
+		}
+		if (value)
+			WindowsDeleteString(value);
+		return hr;
+	}
+
 	HRESULT ResolveStartControl( InstanceHandle handle, const StartElement &element, bool *isStartControl )
 	{
 		*isStartControl = false;
@@ -542,6 +595,15 @@ private:
 			return S_OK;
 		}
 
+		CString automationId;
+		HRESULT directHr = GetAutomationIdDirect(handle, automationId);
+		if (SUCCEEDED(directHr))
+		{
+			*isStartControl = automationId.CompareNoCase(L"StartButton") == 0;
+			return S_OK;
+		}
+
+		// Fallback for older/partial diagnostics implementations.
 		unsigned int sourceCount = 0;
 		unsigned int valueCount = 0;
 		PropertyChainSource *sources = NULL;
