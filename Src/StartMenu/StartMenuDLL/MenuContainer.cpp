@@ -2537,9 +2537,11 @@ void CMenuContainer::InitItems( void )
 			}
 	}
 
-	if (m_Items.empty() && m_Path1[0] && m_pDropFolder[0])
+	if (m_Items.empty() && m_Path1[0] && m_pDropFolder[0] &&
+		(!m_bSubMenu || !m_pStdItem || m_pStdItem->id==MENU_NO))
 	{
-		// add (Empty) item to the empty submenus
+		// Add the folder placeholder only when no configured submenu items are
+		// still going to be appended by AddStandardItems().
 		MenuItem item(m_bSubMenu?MENU_EMPTY:MENU_EMPTY_TOP);
 		item.name=FindTranslation(L"Menu.Empty",L"(Empty)");
 		m_Items.push_back(item);
