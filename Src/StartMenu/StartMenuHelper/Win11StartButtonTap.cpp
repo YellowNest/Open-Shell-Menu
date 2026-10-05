@@ -427,6 +427,7 @@ public:
 		// VisualElement is an [in] parameter. The XAML diagnostics runtime owns
 		// the BSTR fields; copy the values we need but never free callback input.
 		bool interesting = false;
+		bool routeTopologyChanged = false;
 
 		EnterCriticalSection(&m_Lock);
 		if (mutationType == Remove)
@@ -465,18 +466,30 @@ public:
 			}
 			m_Elements[element.Handle] = record;
 			const bool isXamlSource = record.type == L"Windows.UI.Xaml.Hosting.DesktopWindowXamlSource";
+			const bool isStartCandidate = IsStartControlCandidate(record);
 			if (isXamlSource)
 				m_XamlSources.insert(element.Handle);
 
-			interesting = isXamlSource || IsStartControlCandidate(record) || IsStartGlyph(record) ||
+			routeTopologyChanged = isXamlSource || isStartCandidate;
+			interesting = routeTopologyChanged || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
 		LeaveCriticalSection(&m_Lock);
 
 		// Do not mutate XAML routed-event handler collections from inside the
-		// visual-tree callback. If an active route is disappearing, queue the
-		// fallback transition first; the posted apply pass then removes the stale
-		// route after the diagnostics callback has unwound.
+		// visual-tree callback. Any topology change that can alter the required
+		// Start routes must first re-arm the WH_MOUSE fallback. This closes the
+		// window between a new taskbar/XAML source appearing and the asynchronous
+		// ApplyState pass recalculating whether every native Start slot is routed.
+		if (mutationType == Add && routeTopologyChanged &&
+			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) && !m_InputRoutes.empty())
+		{
+			ReportInputBridgeState(WIN11_START_INPUT_PROBING);
+		}
+
+		// If an active route is disappearing, queue the fallback transition first;
+		// the posted apply pass then removes the stale route after the diagnostics
+		// callback has unwound.
 		if (mutationType == Remove && InputRouteUsesHandle(element.Handle))
 		{
 			ReportInputBridgeState(WIN11_START_INPUT_PROBING);
@@ -655,6 +668,18 @@ public:
 			}
 		}
 
+		// Prove that XAML accepts suppression before forwarding the event and
+		// before this route can retire WH_MOUSE. If this ever fails, prefer a
+		// single swallowed event plus restored fallback over double-activating
+		// both Open-Shell and the native Start button.
+		hr = args->put_Handled(TRUE);
+		if (FAILED(hr))
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: failed to mark routed pointer handled 0x%08X", hr);
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
 		if (!PostInputMessage(taskbar, mouseMessage, screenPoint))
 		{
 			InvalidateInputRoute(*route);
@@ -663,7 +688,6 @@ public:
 
 		route->pointerInside = true;
 		route->taskbar = taskbar;
-		args->put_Handled(TRUE);
 
 		if (!route->verified)
 		{
