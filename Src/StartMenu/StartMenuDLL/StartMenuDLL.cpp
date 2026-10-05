@@ -3650,6 +3650,16 @@ static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM l
 	return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
+void SetWin11StartButtonMouseHookFallback( bool enable )
+{
+	if (!IsWin11() || !g_TaskBar || !g_StartMenuMsg)
+		return;
+
+	// XAML diagnostics callbacks run on the XAML thread. Mutate the thread-local
+	// WH_MOUSE hook only from Explorer's taskbar thread through HookDesktopThread.
+	PostMessage(g_TaskBar, g_StartMenuMsg, MSG_WIN11MOUSEHOOK, enable ? 1 : 0);
+}
+
 // WH_GETMESSAGE hook for the taskbar thread
 static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lParam )
 {
@@ -3673,6 +3683,20 @@ if (!g_bTrimHooks)
 		if (msg->message==g_StartMenuMsg && msg->hwnd==g_TaskBar)
 		{
 			msg->message=WM_NULL;
+			if (msg->wParam==MSG_WIN11MOUSEHOOK)
+			{
+				if (msg->lParam)
+				{
+					if (!g_StartMouseHook)
+						g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
+				}
+				else if (g_StartMouseHook)
+				{
+					UnhookWindowsHookEx(g_StartMouseHook);
+					g_StartMouseHook=NULL;
+				}
+				return 0;
+			}
 			static bool bProcessing; // prevent reentry
 			if (!bProcessing)
 			{

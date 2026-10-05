@@ -100,6 +100,7 @@ enum TMenuMsgParam // wParam for the OpenShellMenu.StartMenuMsg message
 	MSG_REDRAWTASKBAR, // redraw taskbar, lParam is the HWND (NULL for all)
 	MSG_RELOADSETTINGS, // reloads the settings from the registry
 	MSG_SETMONITOR, // sets the start screen monitor
+	MSG_WIN11MOUSEHOOK, // enable/disable the Win11 mouse-hook fallback, lParam is bool
 };
 
 STARTMENUAPI extern enum _MINIDUMP_TYPE MiniDumpType;
@@ -118,6 +119,7 @@ void EnableHotkeys( THotkeys enable );
 bool PointAroundStartButton( size_t taskbarId, const CPoint &pt=CPoint(GetMessagePos()) );
 void ResetHotCorners( void );
 void RedrawTaskbars( void );
+void SetWin11StartButtonMouseHookFallback( bool enable );
 
 enum TUpdateTaskbar
 {

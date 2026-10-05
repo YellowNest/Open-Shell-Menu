@@ -8,6 +8,7 @@
 
 #include "stdafx.h"
 #include "Win11StartButton.h"
+#include "StartMenuDLL.h"
 #include "Settings.h"
 #include "LogManager.h"
 #include "ResourceHelper.h"
@@ -159,6 +160,10 @@ public:
 
 		if (!site)
 		{
+			// If the diagnostics host detaches unexpectedly, immediately return to
+			// the proven mouse-hook path. A later successful TAP connection can
+			// retire it again after the Start control is verified and suppressed.
+			SetWin11StartButtonMouseHookFallback(true);
 			AcquireSRWLockExclusive(&g_TapLock);
 			if (g_Tap == this)
 				g_Tap = NULL;
@@ -356,7 +361,8 @@ private:
 		{
 			bool enabled = InterlockedCompareExchange(&g_StartButtonActive, 0, 0) != 0 &&
 				GetSettingBool(L"EnableStartButton");
-			tap->ApplyState(enabled);
+			bool xamlOwnsInput = tap->ApplyState(enabled);
+			SetWin11StartButtonMouseHookFallback(!xamlOwnsInput);
 			return 0;
 		}
 		if (msg == WM_OS_STARTBUTTON_SHUTDOWN && tap)
@@ -369,6 +375,7 @@ private:
 		// The window is owned by the same thread on which SetSite ran. Keep all
 		// operations touching the XAML diagnostics interfaces on this thread.
 		ApplyState(false);
+		SetWin11StartButtonMouseHookFallback(true);
 
 		if (m_Visual && m_Advised)
 		{
@@ -641,10 +648,10 @@ private:
 		LeaveCriticalSection(&m_Lock);
 	}
 
-	void ApplyState( bool enabled )
+	bool ApplyState( bool enabled )
 	{
 		if (!m_Visual)
-			return;
+			return false;
 
 		std::vector<std::pair<InstanceHandle, StartElement>> elements;
 		EnterCriticalSection(&m_Lock);
@@ -676,6 +683,8 @@ private:
 		LeaveCriticalSection(&m_Lock);
 
 		const bool allTaskbars = GetSettingBool(L"AllTaskbars");
+		bool hasInputTarget = false;
+		bool allInputTargetsSuppressed = true;
 
 		for (size_t i = 0; i < elements.size(); i++)
 		{
@@ -687,6 +696,7 @@ private:
 				bool target = allTaskbars || !primaryStart || handle == primaryStart;
 				if (enabled && target)
 				{
+					hasInputTarget = true;
 					if (!record.hitTestOverride)
 					{
 						HRESULT hr = SetPropertyText(handle, L"IsHitTestVisible", L"False");
@@ -694,8 +704,11 @@ private:
 						{
 							bool value = true;
 							SetOverrideFlags(handle, NULL, &value);
+							record.hitTestOverride = true;
 						}
 					}
+					if (!record.hitTestOverride)
+						allInputTargetsSuppressed = false;
 				}
 				else if (record.hitTestOverride)
 				{
@@ -739,6 +752,11 @@ private:
 				}
 			}
 		}
+
+		// Only retire the broad taskbar WH_MOUSE hook once every targeted Start
+		// control is positively identified and has stopped participating in XAML
+		// hit testing. Any ambiguity or property failure keeps the old path alive.
+		return enabled && hasInputTarget && allInputTargetsSuppressed;
 	}
 
 	LONG m_Refs;
