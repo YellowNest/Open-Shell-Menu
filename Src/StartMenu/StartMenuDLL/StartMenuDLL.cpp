@@ -3689,7 +3689,14 @@ static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM l
 		if (taskBar && info->hwnd!=taskBar->startButton && taskBar->oldButton)
 		{
 			if (inputState==WIN11_START_INPUT_PROBING && wParam==WM_MOUSEMOVE)
+			{
+				// Preserve existing Open-Shell hover behavior while also allowing
+				// this movement to reach XAML and prove the new route. A duplicate
+				// synthetic WM_MOUSEMOVE is harmless; button messages remain owned
+				// exclusively by the fallback until the route is confirmed.
+				PostMessage(taskBar->oldButton,WM_MOUSEMOVE,0,MAKELPARAM(info->pt.x,info->pt.y));
 				return CallNextHookEx(NULL,code,wParam,lParam);
+			}
 
 			// Preserve the existing behavior until XAML routing is confirmed.
 			PostMessage(taskBar->oldButton,(UINT)wParam,0,MAKELPARAM(info->pt.x,info->pt.y));
@@ -3751,7 +3758,23 @@ static bool RewriteWin11StartInputMessage( MSG *msg )
 		return false;
 	}
 
-	POINT screenPoint={(short)LOWORD(msg->lParam),(short)HIWORD(msg->lParam)};
+	POINT screenPoint={};
+	if (mouseMessage!=WM_MOUSELEAVE)
+	{
+		// The helper transports coordinates relative to the taskbar HWND rather
+		// than global virtual-screen coordinates. LPARAM only carries signed
+		// 16-bit components; taskbar-relative values avoid truncating negative
+		// or very large multi-monitor desktop coordinates.
+		POINT taskbarPoint={(short)LOWORD(msg->lParam),(short)HIWORD(msg->lParam)};
+		screenPoint=taskbarPoint;
+		if (!ClientToScreen(taskBar->taskBar,&screenPoint))
+		{
+			SetWin11StartInputState(WIN11_START_INPUT_FALLBACK);
+			msg->message=WM_NULL;
+			return false;
+		}
+	}
+
 	msg->hwnd=taskBar->oldButton;
 	msg->message=mouseMessage;
 	msg->wParam=0;
