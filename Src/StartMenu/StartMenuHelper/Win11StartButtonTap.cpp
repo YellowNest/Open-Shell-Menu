@@ -122,7 +122,8 @@ struct StartInputRoute
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> startElement;
 	CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> startFramework;
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> rootElement;
-	CComPtr<ABI::Windows::UI::Xaml::Input::IPointerEventHandler> handler;
+	CComPtr<ABI::Windows::UI::Xaml::Input::IPointerEventHandler> pointerHandler;
+	CComPtr<IInspectable> handler;
 	bool verified;
 	bool pointerInside;
 	HWND taskbar;
@@ -373,6 +374,7 @@ public:
 				SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
 				DestroyWindow(dispatch);
 			}
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -439,7 +441,10 @@ public:
 		LeaveCriticalSection(&m_Lock);
 
 		if (mutationType == Remove && InputRouteUsesHandle(element.Handle))
+		{
+			RemoveInputRoutesUsingHandle(element.Handle);
 			interesting = true;
+		}
 		if (interesting)
 			RequestApply(false);
 		return S_OK;
@@ -639,6 +644,17 @@ private:
 		return false;
 	}
 
+	void RemoveInputRoutesUsingHandle( InstanceHandle handle )
+	{
+		for (size_t i = 0; i < m_InputRoutes.size();)
+		{
+			if (m_InputRoutes[i].startHandle == handle || m_InputRoutes[i].rootHandle == handle)
+				DetachInputRoute(i);
+			else
+				i++;
+		}
+	}
+
 	void InvalidateInputRoute( StartInputRoute &route )
 	{
 		route.verified = false;
@@ -741,9 +757,12 @@ private:
 		auto handler = Microsoft::WRL::Make<CStartPointerHandler>(this, startHandle);
 		if (!handler)
 			return false;
-		route.handler = handler.Get();
+		route.pointerHandler = handler.Get();
+		HRESULT hr = handler->QueryInterface(IID_PPV_ARGS(&route.handler));
+		if (FAILED(hr) || !route.handler)
+			return false;
 
-		HRESULT hr = route.rootElement->AddHandler(m_PointerEnteredEvent, route.handler, TRUE);
+		hr = route.rootElement->AddHandler(m_PointerEnteredEvent, route.handler, TRUE);
 		if (SUCCEEDED(hr))
 			hr = route.rootElement->AddHandler(m_PointerMovedEvent, route.handler, TRUE);
 		if (SUCCEEDED(hr))
