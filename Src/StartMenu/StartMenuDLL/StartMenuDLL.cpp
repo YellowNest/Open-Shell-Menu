@@ -3752,19 +3752,32 @@ static bool RewriteWin11StartInputMessage( MSG *msg )
 // WH_GETMESSAGE hook for the taskbar thread
 static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lParam )
 {
+	// Input-route state changes are safety-critical. Process them even while an
+	// Open-Shell popup menu is running its nested message loop; otherwise a
+	// fallback request can be lost while WH_MOUSE is detached.
+	if (code==HC_ACTION && wParam)
+	{
+		MSG *controlMsg=(MSG*)lParam;
+		if (controlMsg->message==GetWin11StartInputStateMessage())
+		{
+			LONG state=(LONG)controlMsg->wParam;
+			if (state>=WIN11_START_INPUT_FALLBACK && state<=WIN11_START_INPUT_ACTIVE)
+				SetWin11StartInputState(state);
+			controlMsg->message=WM_NULL;
+			return CallNextHookEx(NULL,code,wParam,lParam);
+		}
+		if (g_bInMenu && controlMsg->message==GetWin11StartInputMessage())
+		{
+			controlMsg->message=WM_NULL;
+			return CallNextHookEx(NULL,code,wParam,lParam);
+		}
+	}
+
 	if (code==HC_ACTION && wParam && !g_bInMenu)
 	{
 		MSG *msg=(MSG*)lParam;
 		FindTaskBar();
 
-		if (msg->message==GetWin11StartInputStateMessage())
-		{
-			LONG state=(LONG)msg->wParam;
-			if (state>=WIN11_START_INPUT_FALLBACK && state<=WIN11_START_INPUT_ACTIVE)
-				SetWin11StartInputState(state);
-			msg->message=WM_NULL;
-			return CallNextHookEx(NULL,code,wParam,lParam);
-		}
 		if (msg->message==GetWin11StartInputMessage())
 			RewriteWin11StartInputMessage(msg);
 
