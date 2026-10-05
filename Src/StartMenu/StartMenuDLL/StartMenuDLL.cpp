@@ -408,6 +408,63 @@ static LRESULT CALLBACK HookProgManThread( int code, WPARAM wParam, LPARAM lPara
 static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lParam );
 static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM lParam);
 
+enum
+{
+	WIN11_START_MOUSE_FALLBACK,
+	WIN11_START_MOUSE_XAML,
+};
+
+static UINT GetWin11StartMouseStateMessage( void )
+{
+	static UINT message=RegisterWindowMessage(L"OpenShell.Win11StartMouseState");
+	return message;
+}
+
+static void SetWin11StartMouseState( LONG state )
+{
+	if (!IsWin11())
+		return;
+
+	if (state==WIN11_START_MOUSE_XAML)
+	{
+		if (g_StartMouseHook)
+		{
+			HHOOK hook=g_StartMouseHook;
+			if (UnhookWindowsHookEx(hook))
+			{
+				g_StartMouseHook=NULL;
+				LogToFile(STARTUP_LOG,L"Win11StartButton: WH_MOUSE retired after XAML hit-test suppression");
+			}
+			else
+			{
+				LogToFile(STARTUP_LOG,L"Win11StartButton: unable to retire WH_MOUSE 0x%08X",GetLastError());
+			}
+		}
+	}
+	else if (!g_StartMouseHook)
+	{
+		g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
+		if (g_StartMouseHook)
+			LogToFile(STARTUP_LOG,L"Win11StartButton: WH_MOUSE fallback restored");
+		else
+			LogToFile(STARTUP_LOG,L"Win11StartButton: unable to restore WH_MOUSE fallback 0x%08X",GetLastError());
+	}
+}
+
+static void DrainWin11StartMouseStateMessages( void )
+{
+	if (!IsWin11())
+		return;
+
+	MSG msg;
+	UINT message=GetWin11StartMouseStateMessage();
+	if (!message)
+		return;
+	while (PeekMessage(&msg,NULL,message,message,PM_REMOVE))
+	{
+	}
+}
+
 static BOOL CALLBACK FindTooltipEnum( HWND hwnd, LPARAM lParam )
 {
 	// look for tooltip control in the current thread that has a tool for g_TaskBar+g_StartButton
@@ -3292,6 +3349,9 @@ static DWORD WINAPI ExitThreadProc( void *param )
 static void CleanStartMenuDLL( void )
 {
 	StopWin11StartButtonMonitor();
+	// The TAP may outlive StartMenuDLL. Do not leave a state message queued for
+	// a future DLL instance after this instance has begun tearing its hooks down.
+	DrainWin11StartMouseStateMessages();
 
 	ClearIatHook(g_DwmpBTRHook);
 	g_DwmpBTRHook=NULL;
@@ -3653,6 +3713,18 @@ static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM l
 // WH_GETMESSAGE hook for the taskbar thread
 static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lParam )
 {
+	if (code==HC_ACTION && wParam)
+	{
+		MSG *msg=(MSG*)lParam;
+		UINT startMouseStateMessage=IsWin11()?GetWin11StartMouseStateMessage():0;
+		if (startMouseStateMessage && msg->message==startMouseStateMessage)
+		{
+			SetWin11StartMouseState((LONG)msg->wParam);
+			msg->message=WM_NULL;
+			return CallNextHookEx(NULL,code,wParam,lParam);
+		}
+	}
+
 	if (code==HC_ACTION && wParam && !g_bInMenu)
 	{
 		MSG *msg=(MSG*)lParam;
