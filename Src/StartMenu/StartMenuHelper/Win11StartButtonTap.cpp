@@ -467,11 +467,14 @@ public:
 		LeaveCriticalSection(&m_Lock);
 
 		// Do not mutate XAML routed-event handler collections from inside the
-		// visual-tree callback. The posted apply pass runs on this same XAML
-		// thread after the diagnostics callback has unwound and removes stale
-		// routes through SyncInputRoutes().
+		// visual-tree callback. If an active route is disappearing, queue the
+		// fallback transition first; the posted apply pass then removes the stale
+		// route after the diagnostics callback has unwound.
 		if (mutationType == Remove && InputRouteUsesHandle(element.Handle))
+		{
+			ReportInputBridgeState(WIN11_START_INPUT_PROBING);
 			interesting = true;
+		}
 		if (interesting)
 			RequestApply(false);
 		return S_OK;
