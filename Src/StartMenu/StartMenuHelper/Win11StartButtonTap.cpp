@@ -826,6 +826,18 @@ private:
 					keep = true;
 					break;
 				}
+
+			// Visual-tree removals are applied after the diagnostics callback
+			// unwinds. A root can disappear before its Start descendant is reported
+			// removed, so validate both handles before retaining the route.
+			if (keep)
+			{
+				EnterCriticalSection(&m_Lock);
+				keep = m_Elements.find(m_InputRoutes[i].startHandle) != m_Elements.end() &&
+					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end();
+				LeaveCriticalSection(&m_Lock);
+			}
+
 			if (!keep)
 				DetachInputRoute(i);
 			else
