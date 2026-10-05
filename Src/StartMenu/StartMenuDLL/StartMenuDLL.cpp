@@ -80,11 +80,17 @@ static void DrainWin11StartInputMessages( void )
 	MSG msg;
 	const UINT inputMessage=GetWin11StartInputMessage();
 	const UINT stateMessage=GetWin11StartInputStateMessage();
-	while (PeekMessage(&msg,NULL,inputMessage,inputMessage,PM_REMOVE))
+	if (inputMessage)
 	{
+		while (PeekMessage(&msg,NULL,inputMessage,inputMessage,PM_REMOVE))
+		{
+		}
 	}
-	while (PeekMessage(&msg,NULL,stateMessage,stateMessage,PM_REMOVE))
+	if (stateMessage)
 	{
+		while (PeekMessage(&msg,NULL,stateMessage,stateMessage,PM_REMOVE))
+		{
+		}
 	}
 }
 
@@ -3807,7 +3813,9 @@ static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lPara
 	if (code==HC_ACTION && wParam)
 	{
 		MSG *controlMsg=(MSG*)lParam;
-		if (controlMsg->message==GetWin11StartInputStateMessage())
+		const UINT stateMessage=GetWin11StartInputStateMessage();
+		const UINT inputMessage=GetWin11StartInputMessage();
+		if (stateMessage && controlMsg->message==stateMessage)
 		{
 			LONG state=(LONG)controlMsg->wParam;
 			if (state>=WIN11_START_INPUT_FALLBACK && state<=WIN11_START_INPUT_ACTIVE)
@@ -3815,7 +3823,7 @@ static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lPara
 			controlMsg->message=WM_NULL;
 			return CallNextHookEx(NULL,code,wParam,lParam);
 		}
-		if (g_bInMenu && controlMsg->message==GetWin11StartInputMessage())
+		if (inputMessage && g_bInMenu && controlMsg->message==inputMessage)
 		{
 			controlMsg->message=WM_NULL;
 			return CallNextHookEx(NULL,code,wParam,lParam);
@@ -3828,7 +3836,8 @@ static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lPara
 		FindTaskBar();
 
 		bool win11RoutedInput=false;
-		if (msg->message==GetWin11StartInputMessage())
+		const UINT inputMessage=GetWin11StartInputMessage();
+		if (inputMessage && msg->message==inputMessage)
 			win11RoutedInput=RewriteWin11StartInputMessage(msg);
 
 		if (IsSettingsMessage(msg))
