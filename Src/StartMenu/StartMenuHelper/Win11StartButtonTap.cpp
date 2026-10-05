@@ -8,6 +8,7 @@
 
 #include "stdafx.h"
 #include "Win11StartButtonTap.h"
+#include "StartMenuHelper_h.h"
 #include "dllmain.h"
 #include "Settings.h"
 #include "StringUtils.h"
