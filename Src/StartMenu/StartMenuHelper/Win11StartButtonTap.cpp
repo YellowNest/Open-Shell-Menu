@@ -88,6 +88,14 @@ static bool IsStartGlyph( const StartElement &element )
 	return false;
 }
 
+static void FreeVisualElementStrings( VisualElement &element )
+{
+	SysFreeString(element.Type);
+	SysFreeString(element.Name);
+	SysFreeString(element.SrcInfo.FileName);
+	SysFreeString(element.SrcInfo.Hash);
+}
+
 class CWin11StartButtonTap: public IObjectWithSite, public IVisualTreeServiceCallback2
 {
 public:
@@ -245,6 +253,9 @@ public:
 
 	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
 	{
+		// Add notifications transfer ownership of VisualElement's BSTRs to the
+		// callback. For Remove notifications only element.Handle is valid.
+		const bool ownsElementStrings = mutationType == Add;
 		bool interesting = false;
 
 		EnterCriticalSection(&m_Lock);
@@ -290,6 +301,8 @@ public:
 
 		if (interesting)
 			RequestApply(false);
+		if (ownsElementStrings)
+			FreeVisualElementStrings(element);
 		return S_OK;
 	}
 
@@ -731,7 +744,14 @@ public:
 		return hr;
 	}
 
-	STDMETHODIMP LockServer( BOOL ) { return S_OK; }
+	STDMETHODIMP LockServer( BOOL lock )
+	{
+		if (lock)
+			_AtlModule.Lock();
+		else
+			_AtlModule.Unlock();
+		return S_OK;
+	}
 
 private:
 	LONG m_Refs;
@@ -739,20 +759,12 @@ private:
 
 static CStartButtonTapFactory g_Factory;
 
-// xamlom.h declares DllGetClassObject through the platform headers, so export
-// our implementation under that name via a linker alias.
-extern "C" HRESULT STDMETHODCALLTYPE OpenShellStartButtonDllGetClassObject( REFCLSID clsid, REFIID riid, LPVOID *ppv )
+HRESULT GetWin11StartButtonTapClassObject( REFCLSID clsid, REFIID riid, LPVOID *ppv )
 {
 	if (!IsEqualGUID(clsid, CLSID_OpenShellStartButtonTap))
 		return CLASS_E_CLASSNOTAVAILABLE;
 	return g_Factory.QueryInterface(riid, ppv);
 }
-
-#ifdef _M_IX86
-#pragma comment(linker, "/EXPORT:DllGetClassObject=_OpenShellStartButtonDllGetClassObject@12,PRIVATE")
-#else
-#pragma comment(linker, "/EXPORT:DllGetClassObject=OpenShellStartButtonDllGetClassObject,PRIVATE")
-#endif
 
 typedef HRESULT (WINAPI *InitXamlDiagnosticsEx_t)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR );
 
