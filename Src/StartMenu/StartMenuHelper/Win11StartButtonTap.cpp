@@ -1263,16 +1263,28 @@ private:
 
 		const bool allTaskbars = InterlockedCompareExchange(&g_AllTaskbars, 0, 0) != 0;
 
-		// WH_MOUSE historically intercepts the native Start area on every
-		// taskbar, even when the custom visual button is shown only on the
-		// primary taskbar. XAML input coverage must therefore include every
-		// native Start control before the thread-global hook can be removed.
+		size_t startControlCount = 0;
+		for (size_t i = 0; i < elements.size(); i++)
+			if (elements[i].second.isStartControl)
+				startControlCount++;
+
+		// The fallback hook is thread-global. It can be retired only when every
+		// native Start slot has an Open-Shell replacement/input route. With
+		// multiple taskbars and AllTaskbars disabled, secondary native Start
+		// controls must remain hit-testable for touch/pen and keep the established
+		// WH_MOUSE fallback for mouse input.
+		const bool canRetireMouseHook = allTaskbars || startControlCount <= 1;
 		std::vector<InstanceHandle> inputTargets;
-		if (enabled)
+		if (enabled && canRetireMouseHook)
 		{
 			for (size_t i = 0; i < elements.size(); i++)
-				if (elements[i].second.isStartControl)
-					inputTargets.push_back(elements[i].first);
+			{
+				if (!elements[i].second.isStartControl)
+					continue;
+				InstanceHandle handle = elements[i].first;
+				if (allTaskbars || !primaryStart || handle == primaryStart)
+					inputTargets.push_back(handle);
+			}
 		}
 		SyncInputRoutes(inputTargets);
 
@@ -1283,11 +1295,8 @@ private:
 
 			if (record.isStartControl)
 			{
-				// Input interception is global across Explorer's taskbar thread.
-				// Keep every native Start control visually in place as configured,
-				// but make all of them transparent to XAML hit testing while the
-				// Open-Shell input bridge is active.
-				if (enabled)
+				bool target = allTaskbars || !primaryStart || handle == primaryStart;
+				if (enabled && target)
 				{
 					if (!record.hitTestOverride)
 					{
