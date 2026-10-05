@@ -146,10 +146,8 @@ class CStartPointerHandler:
 		ABI::Windows::UI::Xaml::Input::IPointerEventHandler>
 {
 public:
-	CStartPointerHandler( CWin11StartButtonTap *owner, InstanceHandle startHandle )
-		: m_Owner(owner), m_StartHandle(startHandle)
-	{
-	}
+	CStartPointerHandler( CWin11StartButtonTap *owner, InstanceHandle startHandle );
+	~CStartPointerHandler( void );
 
 	HRESULT STDMETHODCALLTYPE GetTrustLevel( TrustLevel *trustLevel ) override
 	{
@@ -440,11 +438,12 @@ public:
 		}
 		LeaveCriticalSection(&m_Lock);
 
+		// Do not mutate XAML routed-event handler collections from inside the
+		// visual-tree callback. The posted apply pass runs on this same XAML
+		// thread after the diagnostics callback has unwound and removes stale
+		// routes through SyncInputRoutes().
 		if (mutationType == Remove && InputRouteUsesHandle(element.Handle))
-		{
-			RemoveInputRoutesUsingHandle(element.Handle);
 			interesting = true;
-		}
 		if (interesting)
 			RequestApply(false);
 		return S_OK;
@@ -644,17 +643,6 @@ private:
 		return false;
 	}
 
-	void RemoveInputRoutesUsingHandle( InstanceHandle handle )
-	{
-		for (size_t i = 0; i < m_InputRoutes.size();)
-		{
-			if (m_InputRoutes[i].startHandle == handle || m_InputRoutes[i].rootHandle == handle)
-				DetachInputRoute(i);
-			else
-				i++;
-		}
-	}
-
 	void InvalidateInputRoute( StartInputRoute &route )
 	{
 		route.verified = false;
@@ -689,6 +677,12 @@ private:
 			FAILED(m_UIElementStatics->get_PointerExitedEvent(&m_PointerExitedEvent)))
 		{
 			LogToFile(STARTUP_LOG, L"Win11StartInput: pointer routed-event metadata unavailable");
+			m_PointerEnteredEvent.Release();
+			m_PointerMovedEvent.Release();
+			m_PointerPressedEvent.Release();
+			m_PointerReleasedEvent.Release();
+			m_PointerExitedEvent.Release();
+			m_UIElementStatics.Release();
 			return false;
 		}
 		return true;
@@ -1259,6 +1253,19 @@ private:
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 	std::vector<StartInputRoute> m_InputRoutes;
 };
+
+CStartPointerHandler::CStartPointerHandler( CWin11StartButtonTap *owner, InstanceHandle startHandle )
+	: m_Owner(owner), m_StartHandle(startHandle)
+{
+	if (m_Owner)
+		m_Owner->AddRef();
+}
+
+CStartPointerHandler::~CStartPointerHandler( void )
+{
+	if (m_Owner)
+		m_Owner->Release();
+}
 
 HRESULT STDMETHODCALLTYPE CStartPointerHandler::Invoke( IInspectable *,
 	ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args )
