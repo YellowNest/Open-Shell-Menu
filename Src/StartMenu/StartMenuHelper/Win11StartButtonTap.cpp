@@ -149,6 +149,9 @@ struct StartInputRoute
 	bool verified;
 	bool pointerInside;
 	HWND taskbar;
+	DWORD lastPressTime;
+	POINT lastPressPoint;
+	UINT lastPressMessage;
 
 	StartInputRoute( void )
 	{
@@ -158,6 +161,10 @@ struct StartInputRoute
 		verified = false;
 		pointerInside = false;
 		taskbar = NULL;
+		lastPressTime = 0;
+		lastPressPoint.x = 0;
+		lastPressPoint.y = 0;
+		lastPressMessage = 0;
 	}
 };
 
@@ -617,6 +624,43 @@ public:
 				default:
 					break;
 				}
+			}
+		}
+
+		// WH_MOUSE used to deliver Windows-generated double-click messages.
+		// Routed pointer events expose button transitions instead, so preserve the
+		// same behavior before retiring the hook.
+		UINT doubleClickMessage = 0;
+		if (mouseMessage == WM_LBUTTONDOWN)
+			doubleClickMessage = WM_LBUTTONDBLCLK;
+		else if (mouseMessage == WM_RBUTTONDOWN)
+			doubleClickMessage = WM_RBUTTONDBLCLK;
+		else if (mouseMessage == WM_MBUTTONDOWN)
+			doubleClickMessage = WM_MBUTTONDBLCLK;
+
+		if (doubleClickMessage)
+		{
+			DWORD now = GetTickCount();
+			LONG dx = screenPoint.x - route->lastPressPoint.x;
+			LONG dy = screenPoint.y - route->lastPressPoint.y;
+			if (dx < 0) dx = -dx;
+			if (dy < 0) dy = -dy;
+			const int maxDx = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
+			const int maxDy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+
+			if (route->lastPressMessage == mouseMessage &&
+				now - route->lastPressTime <= GetDoubleClickTime() &&
+				dx <= maxDx && dy <= maxDy)
+			{
+				mouseMessage = doubleClickMessage;
+				route->lastPressTime = 0;
+				route->lastPressMessage = 0;
+			}
+			else
+			{
+				route->lastPressTime = now;
+				route->lastPressPoint = screenPoint;
+				route->lastPressMessage = mouseMessage;
 			}
 		}
 
