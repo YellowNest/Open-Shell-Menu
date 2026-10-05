@@ -25,7 +25,8 @@ static bool LoadStartButtonTap( void )
 		return true;
 
 	wchar_t path[MAX_PATH];
-	if (!GetModuleFileName(g_Instance, path, _countof(path)))
+	DWORD pathLength = GetModuleFileName(g_Instance, path, _countof(path));
+	if (!pathLength || pathLength >= _countof(path))
 		return false;
 
 	wchar_t *name = wcsrchr(path, L'\\');
