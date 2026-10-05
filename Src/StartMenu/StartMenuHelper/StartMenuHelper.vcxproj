@@ -92,7 +92,7 @@
       <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>comctl32.lib;uxtheme.lib;winmm.lib;htmlhelp.lib;wininet.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;uxtheme.lib;winmm.lib;htmlhelp.lib;wininet.lib;version.lib;runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>$(TargetName).def</ModuleDefinitionFile>
     </Link>
   </ItemDefinitionGroup>
