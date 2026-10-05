@@ -456,10 +456,11 @@ public:
 				record.discoveryOrder = ++m_NextDiscoveryOrder;
 			}
 			m_Elements[element.Handle] = record;
-			if (record.type == L"Windows.UI.Xaml.Hosting.DesktopWindowXamlSource")
+			const bool isXamlSource = record.type == L"Windows.UI.Xaml.Hosting.DesktopWindowXamlSource";
+			if (isXamlSource)
 				m_XamlSources.insert(element.Handle);
 
-			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
+			interesting = isXamlSource || IsStartControlCandidate(record) || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
 		LeaveCriticalSection(&m_Lock);
