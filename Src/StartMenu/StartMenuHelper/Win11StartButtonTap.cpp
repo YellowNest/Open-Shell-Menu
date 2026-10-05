@@ -85,6 +85,14 @@ static BOOL CALLBACK FindTaskbarAtPointProc( HWND hwnd, LPARAM lParam )
 	return TRUE;
 }
 
+static bool IsPointInTaskbar( HWND taskbar, POINT point )
+{
+	if (!taskbar || !IsWindow(taskbar) || !IsTaskbarWindow(taskbar))
+		return false;
+	RECT rect = {};
+	return GetWindowRect(taskbar, &rect) && PtInRect(&rect, point);
+}
+
 static HWND FindTaskbarAtPoint( POINT point )
 {
 	TaskbarPointSearch search = { point, NULL };
@@ -573,8 +581,10 @@ public:
 			return S_OK;
 		}
 
-		HWND taskbar = FindTaskbarAtPoint(screenPoint);
-		if (!taskbar || !IsWindow(taskbar))
+		HWND taskbar = route->taskbar;
+		if (!IsPointInTaskbar(taskbar, screenPoint))
+			taskbar = FindTaskbarAtPoint(screenPoint);
+		if (!taskbar)
 		{
 			LogToFile(STARTUP_LOG, L"Win11StartInput: no taskbar at pointer position %d,%d", screenPoint.x, screenPoint.y);
 			InvalidateInputRoute(*route);
