@@ -7,10 +7,11 @@
 // left in layout, so centered taskbar positioning remains owned by Windows.
 
 #include "stdafx.h"
-#include "Win11StartButton.h"
+#include "Win11StartButtonTap.h"
+#include "dllmain.h"
 #include "Settings.h"
-#include "LogManager.h"
-#include "ResourceHelper.h"
+#include "StringUtils.h"
+#include "..\StartMenuDLL\LogManager.h"
 
 #include <Windows.UI.Xaml.h>
 #include <xamlom.h>
@@ -22,9 +23,10 @@ static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
-static const UINT WM_OS_STARTBUTTON_SHUTDOWN = WM_APP + 0x35C;
 
 static volatile LONG g_StartButtonActive = 0;
+static volatile LONG g_StartButtonEnabled = 0;
+static volatile LONG g_AllTaskbars = 0;
 static volatile LONG g_ConnectStarted = 0;
 
 static HMODULE GetThisModule( void )
@@ -96,8 +98,8 @@ public:
 		m_Dispatch = NULL;
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
-		m_InjectionReferenceBalanced = false;
 		InitializeCriticalSection(&m_Lock);
+		_AtlModule.Lock();
 	}
 
 	~CWin11StartButtonTap( void )
@@ -114,6 +116,7 @@ public:
 
 		InterlockedExchange(&g_ConnectStarted, 0);
 		DeleteCriticalSection(&m_Lock);
+		_AtlModule.Unlock();
 	}
 
 	STDMETHODIMP QueryInterface( REFIID riid, void **ppv )
@@ -175,22 +178,10 @@ public:
 
 		m_Site = site;
 
-		// Keep the module reference acquired by InitializeXamlDiagnosticsEx for
-		// the whole TAP session. It is balanced only after the callback and all
-		// XAML/COM references have been released. StartMenuDLL has its own module
-		// reference while Open-Shell is active, so balancing the diagnostics
-		// reference during teardown cannot unload code that is still executing.
-		//
-		// Exit may race a connection attempt. Do not attach a new callback after
-		// shutdown has already begun.
-		if (!InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
-		{
-			m_Site.Release();
-			BalanceInjectionReference();
-			InterlockedExchange(&g_ConnectStarted, 0);
-			return S_OK;
-		}
-
+		// XAML Diagnostics keeps the TAP site object and its module loaded for
+		// the lifetime of the diagnostics session. Do not reject a late SetSite
+		// when Open-Shell is inactive: keeping the site attached lets a later
+		// StartMenuDLL instance reuse the same resident TAP safely.
 		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
 		if (FAILED(hr) || !m_Visual)
 		{
