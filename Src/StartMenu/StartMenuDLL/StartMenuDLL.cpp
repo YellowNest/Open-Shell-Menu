@@ -1316,7 +1316,11 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 		}
 	}
 
-	RECT rcOldButton;
+	RECT rcNativeStart = {};
+	const bool hasNativeStartRect = IsWin11() &&
+		GetWin11StartButtonRect(taskBar->taskBar, &rcNativeStart);
+
+	RECT rcOldButton = {};
 	if (taskBar->oldButton)
 		GetWindowRect(taskBar->oldButton, &rcOldButton);
 
@@ -1329,25 +1333,44 @@ static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPO
 			x = rcTask.left;
 		else
 			x = rcTask.right - taskBar->startButtonSize.cx;
-		y = taskBar->oldButton ? rcOldButton.top : rcTask.top;
+
+		if (hasNativeStartRect)
+			y = (rcNativeStart.top + rcNativeStart.bottom - taskBar->startButtonSize.cy) / 2;
+		else
+			y = taskBar->oldButton ? rcOldButton.top : rcTask.top;
 	}
 	else
 	{
-		if (GetWindowLongPtr(taskBar->rebar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
+		// Windows 11's Start button is a XAML control. Its old "Start" HWND is
+		// not a reliable layout anchor on centered taskbars, high DPI, or newer
+		// taskbar implementations. Center the replacement over the verified
+		// AutomationId=StartButton rectangle instead.
+		if (hasNativeStartRect)
+			x = (rcNativeStart.left + rcNativeStart.right - taskBar->startButtonSize.cx) / 2;
+		else if (GetWindowLongPtr(taskBar->rebar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
 			x = (taskBar->oldButton ? rcOldButton.right : rcTask.right) - taskBar->startButtonSize.cx;
 		else
 			x = taskBar->oldButton ? rcOldButton.left : rcTask.left;
+
 		if (GetSettingInt(L"StartButtonType") != START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
-			y = (rcTask.top + rcTask.bottom - taskBar->startButtonSize.cy) / 2;
+		{
+			if (hasNativeStartRect)
+				y = (rcNativeStart.top + rcNativeStart.bottom - taskBar->startButtonSize.cy) / 2;
+			else
+				y = (rcTask.top + rcTask.bottom - taskBar->startButtonSize.cy) / 2;
+		}
 		else if (uEdge == ABE_TOP)
 			y = rcTask.top;
 		else
 			y = rcTask.bottom - taskBar->startButtonSize.cy;
 
-		// Start button on Win11 is a bit shifted to the right
-		// We will shift our Aero button to cover original button
-		if (IsWin11() && (x == info.rcMonitor.left) && (GetStartButtonType() == START_BUTTON_AERO) && !g_epTaskbar)
+		// Keep the legacy Win11 offset only when the actual XAML Start rectangle
+		// is unavailable. Applying both would double-correct the position.
+		if (!hasNativeStartRect && IsWin11() && (x == info.rcMonitor.left) &&
+			(GetStartButtonType() == START_BUTTON_AERO) && !g_epTaskbar)
+		{
 			x += ScaleForDpi(taskBar->taskBar, 6);
+		}
 
 		if (GetStartButtonType() == START_BUTTON_CUSTOM)
 			x += ScaleForDpi(taskBar->taskBar, GetSettingInt(L"StartButtonOffset"));
@@ -1846,8 +1869,21 @@ static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam
 			pPos->hwndInsertAfter=taskBar->startButton;
 		}
 	}
+	if (uMsg==WM_OS_STARTBUTTON_RECT_READY && taskBar)
+	{
+		if (taskBar->bReplaceButton)
+		{
+			WINDOWPOS pos = {};
+			pos.flags = SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE;
+			UpdateStartButtonPosition(taskBar, &pos);
+		}
+		return 0;
+	}
 	if (uMsg==WM_WINDOWPOSCHANGED && taskBar)
 	{
+		if (IsWin11())
+			RefreshWin11StartButtonRects();
+
 		if (taskBar->bReplaceButton)
 		{
 			UpdateStartButtonPosition(taskBar,(WINDOWPOS*)lParam);
