@@ -3684,20 +3684,32 @@ static void SetWin11StartInputState( LONG state )
 	if (!IsWin11())
 		return;
 
-	InterlockedExchange(&g_Win11StartInputState,state);
 	if (state==WIN11_START_INPUT_ACTIVE)
 	{
 		if (g_StartMouseHook)
 		{
-			UnhookWindowsHookEx(g_StartMouseHook);
+			if (!UnhookWindowsHookEx(g_StartMouseHook))
+			{
+				DWORD error=GetLastError();
+				InterlockedExchange(&g_Win11StartInputState,WIN11_START_INPUT_FALLBACK);
+				LogToFile(STARTUP_LOG,L"Win11StartInput: failed to remove WH_MOUSE fallback 0x%08X",error);
+				return;
+			}
 			g_StartMouseHook=NULL;
-			LogToFile(STARTUP_LOG,L"Win11StartInput: XAML routing active; WH_MOUSE fallback removed");
 		}
+		InterlockedExchange(&g_Win11StartInputState,WIN11_START_INPUT_ACTIVE);
+		LogToFile(STARTUP_LOG,L"Win11StartInput: XAML routing active; WH_MOUSE fallback removed");
+		return;
 	}
-	else if (!g_StartMouseHook)
+
+	InterlockedExchange(&g_Win11StartInputState,state);
+	if (!g_StartMouseHook)
 	{
 		g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
-		LogToFile(STARTUP_LOG,L"Win11StartInput: WH_MOUSE fallback restored (%d)",state);
+		if (g_StartMouseHook)
+			LogToFile(STARTUP_LOG,L"Win11StartInput: WH_MOUSE fallback restored (%d)",state);
+		else
+			LogToFile(STARTUP_LOG,L"Win11StartInput: failed to restore WH_MOUSE fallback 0x%08X",GetLastError());
 	}
 }
 
