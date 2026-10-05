@@ -187,7 +187,6 @@ public:
 		{
 			m_Visual.Release();
 			m_Site.Release();
-			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
 			return hr;
 		}
@@ -197,7 +196,6 @@ public:
 			DWORD error = GetLastError();
 			m_Visual.Release();
 			m_Site.Release();
-			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
 			return HRESULT_FROM_WIN32(error);
 		}
@@ -229,7 +227,6 @@ public:
 			}
 			m_Visual.Release();
 			m_Site.Release();
-			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
 		}
 		LogToFile(STARTUP_LOG, L"Win11StartButton: visual tree advise 0x%08X", hr);
@@ -311,25 +308,14 @@ public:
 			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_APPLY, 0, 0);
 	}
 
-	HRESULT Shutdown( void )
+	HRESULT Deactivate( void )
 	{
-		// SetSite creates the dispatch window on the XAML thread. Run the complete
-		// XAML/COM teardown on that same thread rather than releasing apartment-
-		// sensitive interfaces from whichever thread initiated Open-Shell Exit.
+		// The diagnostics runtime retains this site beyond Open-Shell's lifetime.
+		// Restore only our overrides; keep the site, callback and dispatch window
+		// alive so StartMenuDLL can unload/reload independently.
 		if (!m_Dispatch)
 			return E_UNEXPECTED;
-
-		HRESULT hr = (HRESULT)SendMessage(m_Dispatch, WM_OS_STARTBUTTON_SHUTDOWN, 0, 0);
-		if (FAILED(hr))
-			return hr;
-
-		AcquireSRWLockExclusive(&g_TapLock);
-		if (g_Tap == this)
-			g_Tap = NULL;
-		ReleaseSRWLockExclusive(&g_TapLock);
-
-		InterlockedExchange(&g_ConnectStarted, 0);
-		BalanceInjectionReference();
+		RequestApply(true);
 		return S_OK;
 	}
 
@@ -346,58 +332,13 @@ private:
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
 			bool enabled = InterlockedCompareExchange(&g_StartButtonActive, 0, 0) != 0 &&
-				GetSettingBool(L"EnableStartButton");
+				InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) != 0;
 			tap->ApplyState(enabled);
 			return 0;
 		}
-		if (msg == WM_OS_STARTBUTTON_SHUTDOWN && tap)
-			return tap->ShutdownOnDispatchThread();
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
-	HRESULT ShutdownOnDispatchThread( void )
-	{
-		// The window is owned by the same thread on which SetSite ran. Keep all
-		// operations touching the XAML diagnostics interfaces on this thread.
-		ApplyState(false);
-
-		if (m_Visual && m_Advised)
-		{
-			HRESULT hr = m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
-			if (FAILED(hr))
-			{
-				LogToFile(STARTUP_LOG, L"Win11StartButton: visual tree unadvise failed 0x%08X", hr);
-				return hr;
-			}
-			m_Advised = false;
-		}
-
-		m_Visual.Release();
-		m_Site.Release();
-
-		if (m_Dispatch)
-		{
-			HWND dispatch = m_Dispatch;
-			m_Dispatch = NULL;
-			SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
-			DestroyWindow(dispatch);
-		}
-		return S_OK;
-	}
-
-	void BalanceInjectionReference( void )
-	{
-		if (m_InjectionReferenceBalanced)
-			return;
-
-		HMODULE module = GetThisModule();
-		if (module)
-		{
-			// Mark first: FreeLibrary can run loader callbacks before it returns.
-			m_InjectionReferenceBalanced = true;
-			FreeLibrary(module);
-		}
-	}
 
 	bool CreateDispatchWindow( void )
 	{
@@ -666,7 +607,7 @@ private:
 		primaryStart = m_PrimaryStart;
 		LeaveCriticalSection(&m_Lock);
 
-		const bool allTaskbars = GetSettingBool(L"AllTaskbars");
+		const bool allTaskbars = InterlockedCompareExchange(&g_AllTaskbars, 0, 0) != 0;
 
 		for (size_t i = 0; i < elements.size(); i++)
 		{
@@ -740,7 +681,6 @@ private:
 	CComPtr<IVisualTreeService> m_Visual;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
-	bool m_InjectionReferenceBalanced;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
