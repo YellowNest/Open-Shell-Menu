@@ -29,6 +29,9 @@ static const UINT WM_OS_STARTBUTTON_SHUTDOWN = WM_APP + 0x35C;
 
 static volatile LONG g_StartButtonActive = 0;
 static volatile LONG g_ConnectStarted = 0;
+static volatile LONG g_StartRectRefreshStarted = 0;
+static SRWLOCK g_StartRectLock = SRWLOCK_INIT;
+static std::unordered_map<HWND, RECT> g_StartRects;
 
 static HMODULE GetThisModule( void )
 {
@@ -860,6 +863,171 @@ extern "C" HRESULT STDMETHODCALLTYPE OpenShellStartButtonDllGetClassObject( REFC
 
 typedef HRESULT (WINAPI *InitXamlDiagnosticsEx_t)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR );
 
+struct StartRectRefreshContext
+{
+	IUIAutomation *automation;
+	IUIAutomationCondition *condition;
+};
+
+static bool IsTaskbarWindowForCurrentProcess( HWND hwnd )
+{
+	DWORD processId = 0;
+	if (!GetWindowThreadProcessId(hwnd, &processId) || processId != GetCurrentProcessId())
+		return false;
+
+	wchar_t className[64] = {};
+	if (!GetClassName(hwnd, className, _countof(className)))
+		return false;
+
+	return _wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+		_wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0;
+}
+
+static void CacheStartRect( HWND taskbar, const RECT &rect )
+{
+	AcquireSRWLockExclusive(&g_StartRectLock);
+	g_StartRects[taskbar] = rect;
+	ReleaseSRWLockExclusive(&g_StartRectLock);
+
+	PostMessage(taskbar, WM_OS_STARTBUTTON_RECT_READY, 0, 0);
+}
+
+static void RemoveCachedStartRect( HWND taskbar )
+{
+	AcquireSRWLockExclusive(&g_StartRectLock);
+	g_StartRects.erase(taskbar);
+	ReleaseSRWLockExclusive(&g_StartRectLock);
+}
+
+static BOOL CALLBACK RefreshStartRectEnumProc( HWND hwnd, LPARAM lParam )
+{
+	if (!IsTaskbarWindowForCurrentProcess(hwnd))
+		return TRUE;
+
+	StartRectRefreshContext *context = (StartRectRefreshContext*)lParam;
+	if (!context || !context->automation || !context->condition)
+		return TRUE;
+
+	CComPtr<IUIAutomationElement> root;
+	HRESULT hr = context->automation->ElementFromHandle(hwnd, &root);
+	if (FAILED(hr) || !root)
+	{
+		RemoveCachedStartRect(hwnd);
+		return TRUE;
+	}
+
+	CComPtr<IUIAutomationElement> start;
+	hr = root->FindFirst(TreeScope_Descendants, context->condition, &start);
+	if (FAILED(hr) || !start)
+	{
+		RemoveCachedStartRect(hwnd);
+		return TRUE;
+	}
+
+	RECT rect = {};
+	hr = start->get_CurrentBoundingRectangle(&rect);
+	if (FAILED(hr) || rect.right <= rect.left || rect.bottom <= rect.top)
+	{
+		RemoveCachedStartRect(hwnd);
+		return TRUE;
+	}
+
+	RECT taskbarRect = {};
+	RECT intersection = {};
+	if (!GetWindowRect(hwnd, &taskbarRect) ||
+		!IntersectRect(&intersection, &rect, &taskbarRect))
+	{
+		RemoveCachedStartRect(hwnd);
+		return TRUE;
+	}
+
+	if (InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
+		CacheStartRect(hwnd, rect);
+	return TRUE;
+}
+
+static DWORD WINAPI StartRectRefreshThread( LPVOID param )
+{
+	HMODULE moduleReference = (HMODULE)param;
+	HRESULT initHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+	bool uninitialize = SUCCEEDED(initHr);
+
+	if (SUCCEEDED(initHr) || initHr == RPC_E_CHANGED_MODE)
+	{
+		CComPtr<IUIAutomation> automation;
+		HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
+			IID_PPV_ARGS(&automation));
+		if (SUCCEEDED(hr) && automation)
+		{
+			CComVariant automationId(L"StartButton");
+			CComPtr<IUIAutomationCondition> condition;
+			hr = automation->CreatePropertyCondition(UIA_AutomationIdPropertyId,
+				automationId, &condition);
+			if (SUCCEEDED(hr) && condition &&
+				InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
+			{
+				StartRectRefreshContext context = { automation, condition };
+				EnumWindows(RefreshStartRectEnumProc, (LPARAM)&context);
+			}
+		}
+	}
+
+	if (uninitialize)
+		CoUninitialize();
+
+	InterlockedExchange(&g_StartRectRefreshStarted, 0);
+	FreeLibraryAndExitThread(moduleReference, 0);
+	return 0;
+}
+
+void RefreshWin11StartButtonRects( void )
+{
+	if (!IsWin11() || !InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
+		return;
+
+	if (InterlockedCompareExchange(&g_StartRectRefreshStarted, 1, 0) != 0)
+		return;
+
+	HMODULE moduleReference = NULL;
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+		(LPCTSTR)&StartRectRefreshThread, &moduleReference))
+	{
+		InterlockedExchange(&g_StartRectRefreshStarted, 0);
+		return;
+	}
+
+	HANDLE thread = CreateThread(NULL, 0, StartRectRefreshThread, moduleReference, 0, NULL);
+	if (thread)
+	{
+		CloseHandle(thread);
+	}
+	else
+	{
+		FreeLibrary(moduleReference);
+		InterlockedExchange(&g_StartRectRefreshStarted, 0);
+	}
+}
+
+bool GetWin11StartButtonRect( HWND taskbar, RECT *rect )
+{
+	if (!rect || !taskbar || !IsWin11())
+		return false;
+
+	bool found = false;
+	AcquireSRWLockShared(&g_StartRectLock);
+	auto it = g_StartRects.find(taskbar);
+	if (it != g_StartRects.end())
+	{
+		*rect = it->second;
+		found = true;
+	}
+	ReleaseSRWLockShared(&g_StartRectLock);
+
+	if (!found)
+		RefreshWin11StartButtonRects();
+	return found;
+}
+
 struct ConnectAttempt
 {
 	InitXamlDiagnosticsEx_t init;
@@ -967,6 +1135,7 @@ void StartWin11StartButtonMonitor( void )
 		return;
 
 	InterlockedExchange(&g_StartButtonActive, 1);
+	RefreshWin11StartButtonRects();
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
@@ -982,6 +1151,7 @@ void UpdateWin11StartButtonMonitor( void )
 	if (!IsWin11())
 		return;
 
+	RefreshWin11StartButtonRects();
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
@@ -1000,6 +1170,11 @@ void StopWin11StartButtonMonitor( void )
 		return;
 
 	InterlockedExchange(&g_StartButtonActive, 0);
+
+	AcquireSRWLockExclusive(&g_StartRectLock);
+	g_StartRects.clear();
+	ReleaseSRWLockExclusive(&g_StartRectLock);
+
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
