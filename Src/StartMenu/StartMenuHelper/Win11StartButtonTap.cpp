@@ -162,7 +162,12 @@ public:
 		if (m_Visual && m_Advised)
 		{
 			ApplyState(false);
-			m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
+			HRESULT hr = m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
+			if (FAILED(hr))
+			{
+				LogToFile(STARTUP_LOG, L"Win11StartButtonTap: visual tree unadvise failed 0x%08X", hr);
+				return hr;
+			}
 			m_Advised = false;
 		}
 		m_Visual.Release();
@@ -174,6 +179,21 @@ public:
 			if (g_Tap == this)
 				g_Tap = NULL;
 			ReleaseSRWLockExclusive(&g_TapLock);
+
+			EnterCriticalSection(&m_Lock);
+			m_Elements.clear();
+			m_PrimaryStart = 0;
+			m_NextDiscoveryOrder = 0;
+			LeaveCriticalSection(&m_Lock);
+
+			if (m_Dispatch && GetWindowThreadProcessId(m_Dispatch, NULL) == GetCurrentThreadId())
+			{
+				HWND dispatch = m_Dispatch;
+				m_Dispatch = NULL;
+				SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
+				DestroyWindow(dispatch);
+			}
+
 			InterlockedExchange(&g_ConnectStarted, 0);
 			return S_OK;
 		}
@@ -791,9 +811,9 @@ static DWORD FinishConnectThread( HMODULE moduleReference, HMODULE runtime, bool
 	if (resetConnectionState)
 		InterlockedExchange(&g_ConnectStarted, 0);
 
-	// The connection worker executes from StartMenuDLL and can outlive the normal
-	// Open-Shell unload path. Release its private module reference and terminate
-	// atomically so the DLL cannot disappear underneath the thread's return path.
+	// Keep a private StartMenuHelper reference while this worker is running.
+	// Release it atomically with thread termination so a failed diagnostics
+	// connection cannot unload the helper underneath the worker's return path.
 	FreeLibraryAndExitThread(moduleReference, 0);
 	return 0;
 }
