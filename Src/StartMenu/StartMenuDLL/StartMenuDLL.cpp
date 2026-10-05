@@ -3744,7 +3744,7 @@ static void SetWin11StartInputState( LONG state )
 static bool RewriteWin11StartInputMessage( MSG *msg )
 {
 	TaskbarInfo *taskBar=FindTaskBarInfoBar(msg->hwnd);
-	if (!taskBar || !taskBar->oldButton)
+	if (!taskBar || !taskBar->oldButton || !IsWindow(taskBar->oldButton))
 	{
 		SetWin11StartInputState(WIN11_START_INPUT_FALLBACK);
 		msg->message=WM_NULL;
@@ -3787,7 +3787,12 @@ static bool RewriteWin11StartInputMessage( MSG *msg )
 	else
 	{
 		POINT clientPoint=screenPoint;
-		ScreenToClient(taskBar->oldButton,&clientPoint);
+		if (!ScreenToClient(taskBar->oldButton,&clientPoint))
+		{
+			SetWin11StartInputState(WIN11_START_INPUT_FALLBACK);
+			msg->message=WM_NULL;
+			return false;
+		}
 		msg->lParam=MAKELPARAM(clientPoint.x,clientPoint.y);
 	}
 	return true;
@@ -4407,6 +4412,17 @@ if (!g_bTrimHooks)
 				}
 				else if (bShowWinX)
 				{
+					// Win+X is shown asynchronously on Windows 11. Cancel any pending
+					// hover-open timer first, otherwise it can open the configured
+					// hover menu a moment later and dismiss Win+X again.
+					if (taskBar->bTimer)
+					{
+						taskBar->bTimer=false;
+						if (taskBar->startButton)
+							KillTimer(taskBar->startButton,'CLSM');
+						if (taskBar->oldButton && taskBar->oldButton!=taskBar->startButton)
+							KillTimer(taskBar->oldButton,'CLSM');
+					}
 					ShowWinX();
 				}
 				else if (bShowWin7)
