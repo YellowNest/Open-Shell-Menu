@@ -292,8 +292,11 @@ public:
 			{
 				interesting = it->second.visibilityOverride || it->second.hitTestOverride ||
 					it->second.isStartControl || IsStartControlCandidate(it->second);
+				// Descendant/icon churn does not change who owns pointer input. Only
+				// removal of the Start control itself (or its active hit-test override)
+				// requires the thread-wide fallback to be re-armed immediately.
 				mouseTopologyChanged = it->second.hitTestOverride || it->second.isStartControl ||
-					IsStartControlCandidate(it->second) || IsUnderStartButtonLocked(it->second.parent);
+					IsStartControlCandidate(it->second);
 				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
 				if (wasPrimary)
