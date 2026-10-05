@@ -15,6 +15,7 @@
 #include "..\StartMenuDLL\LogManager.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.Devices.Input.h>
 #include <Windows.UI.Xaml.Input.h>
 #include <Windows.UI.Input.h>
 #include <xamlom.h>
@@ -520,6 +521,17 @@ public:
 			return S_OK;
 		}
 
+		ABI::Windows::Devices::Input::PointerDeviceType deviceType =
+			ABI::Windows::Devices::Input::PointerDeviceType_Touch;
+		hr = pointer->get_PointerDeviceType(&deviceType);
+		if (FAILED(hr))
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+		if (deviceType != ABI::Windows::Devices::Input::PointerDeviceType_Mouse)
+			return S_OK;
+
 		UINT32 pointerId = 0;
 		hr = pointer->get_PointerId(&pointerId);
 		if (FAILED(hr))
@@ -528,9 +540,15 @@ public:
 			return S_OK;
 		}
 
+		POINT screenPoint = {};
 		POINTER_INFO pointerInfo = {};
-		if (!GetPointerInfo(pointerId, &pointerInfo) || pointerInfo.pointerType != PT_MOUSE)
+		if (GetPointerInfo(pointerId, &pointerInfo))
+			screenPoint = screenPoint;
+		else if (!GetCursorPos(&screenPoint))
+		{
+			InvalidateInputRoute(*route);
 			return S_OK;
+		}
 
 		CComPtr<ABI::Windows::UI::Input::IPointerPoint> point;
 		hr = args->GetCurrentPoint(route->startElement, &point);
@@ -556,7 +574,7 @@ public:
 		if (!inside)
 		{
 			if (route->pointerInside && route->taskbar)
-				PostInputMessage(route->taskbar, WM_MOUSELEAVE, pointerInfo.ptPixelLocation);
+				PostInputMessage(route->taskbar, WM_MOUSELEAVE, screenPoint);
 			route->pointerInside = false;
 			return S_OK;
 		}
@@ -602,7 +620,7 @@ public:
 			}
 		}
 
-		if (!PostInputMessage(taskbar, mouseMessage, pointerInfo.ptPixelLocation))
+		if (!PostInputMessage(taskbar, mouseMessage, screenPoint))
 		{
 			InvalidateInputRoute(*route);
 			return S_OK;
