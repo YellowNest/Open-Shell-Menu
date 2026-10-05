@@ -716,7 +716,8 @@ private:
 				return false;
 			position = MAKELPARAM(taskbarPoint.x, taskbarPoint.y);
 		}
-		return PostMessage(taskbar, GetWin11StartInputMessage(), mouseMessage, position) != FALSE;
+		UINT message = GetWin11StartInputMessage();
+		return message && PostMessage(taskbar, message, mouseMessage, position) != FALSE;
 	}
 
 	void ReprobeInputBridgeState( void )
@@ -739,8 +740,9 @@ private:
 		if (m_LastInputState == state)
 			return;
 
+		UINT message = GetWin11StartInputStateMessage();
 		HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
-		if (taskbar && PostMessage(taskbar, GetWin11StartInputStateMessage(), state, 0))
+		if (message && taskbar && PostMessage(taskbar, message, state, 0))
 		{
 			m_LastInputState = state;
 			LogToFile(STARTUP_LOG, L"Win11StartInput: routing state %d", state);
