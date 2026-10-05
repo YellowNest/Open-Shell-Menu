@@ -380,8 +380,9 @@ private:
 		if (InterlockedCompareExchange(&m_LastMouseState, 0, 0) == state)
 			return;
 
+		UINT message = GetWin11StartMouseStateMessage();
 		HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
-		if (taskbar && PostMessage(taskbar, GetWin11StartMouseStateMessage(), state, 0))
+		if (message && taskbar && PostMessage(taskbar, message, state, 0))
 		{
 			InterlockedExchange(&m_LastMouseState, state);
 			LogToFile(STARTUP_LOG, L"Win11StartButton: mouse routing state %d", state);
