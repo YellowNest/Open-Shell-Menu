@@ -17,6 +17,7 @@
 #include <Windows.UI.Xaml.h>
 #include <Windows.UI.Xaml.Input.h>
 #include <Windows.UI.Input.h>
+#include <windows.ui.xaml.hosting.desktopwindowxamlsource.h>
 #include <xamlom.h>
 #include <ocidl.h>
 #include <roapi.h>
@@ -62,9 +63,8 @@ static bool IsTaskbarWindow( HWND hwnd )
 		wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
 }
 
-static HWND FindTaskbarWindowAtPoint( POINT point )
+static HWND FindTaskbarAncestor( HWND hwnd )
 {
-	HWND hwnd = WindowFromPoint(point);
 	for (int depth = 0; hwnd && depth < 16; depth++)
 	{
 		if (IsTaskbarWindow(hwnd))
@@ -75,7 +75,6 @@ static HWND FindTaskbarWindowAtPoint( POINT point )
 		hwnd = parent;
 	}
 
-	hwnd = WindowFromPoint(point);
 	HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
 	return IsTaskbarWindow(root) ? root : NULL;
 }
@@ -526,12 +525,11 @@ public:
 			if (route->pointerInside && route->taskbar)
 				PostInputMessage(route->taskbar, WM_MOUSELEAVE, pointerInfo.ptPixelLocation);
 			route->pointerInside = false;
-			route->taskbar = NULL;
 			return S_OK;
 		}
 
-		HWND taskbar = FindTaskbarWindowAtPoint(pointerInfo.ptPixelLocation);
-		if (!taskbar)
+		HWND taskbar = route->taskbar;
+		if (!taskbar || !IsWindow(taskbar))
 		{
 			InvalidateInputRoute(*route);
 			return S_OK;
@@ -726,6 +724,46 @@ private:
 		return false;
 	}
 
+	HWND ResolveInputTaskbar( InstanceHandle startHandle )
+	{
+		if (!m_Diagnostics)
+			return NULL;
+
+		std::vector<InstanceHandle> ancestors;
+		EnterCriticalSection(&m_Lock);
+		auto it = m_Elements.find(startHandle);
+		InstanceHandle current = it != m_Elements.end() ? it->second.parent : 0;
+		for (int depth = 0; depth < 64 && current; depth++)
+		{
+			ancestors.push_back(current);
+			auto parent = m_Elements.find(current);
+			if (parent == m_Elements.end())
+				break;
+			current = parent->second.parent;
+		}
+		LeaveCriticalSection(&m_Lock);
+
+		for (auto it2 = ancestors.rbegin(); it2 != ancestors.rend(); ++it2)
+		{
+			CComPtr<IInspectable> inspectable;
+			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(*it2, &inspectable)) || !inspectable)
+				continue;
+
+			CComPtr<IDesktopWindowXamlSourceNative> xamlSource;
+			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&xamlSource))) || !xamlSource)
+				continue;
+
+			HWND xamlHwnd = NULL;
+			if (FAILED(xamlSource->get_WindowHandle(&xamlHwnd)) || !xamlHwnd)
+				continue;
+
+			HWND taskbar = FindTaskbarAncestor(xamlHwnd);
+			if (taskbar)
+				return taskbar;
+		}
+		return NULL;
+	}
+
 	bool AttachInputRoute( InstanceHandle startHandle )
 	{
 		if (FindInputRoute(startHandle))
@@ -747,6 +785,13 @@ private:
 			return false;
 		if (!GetInputRoot(startHandle, &route.rootHandle, route.rootElement))
 			return false;
+		route.taskbar = ResolveInputTaskbar(startHandle);
+		if (!route.taskbar)
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: unable to resolve taskbar HWND for handle %llu; keeping WH_MOUSE fallback",
+				(unsigned long long)startHandle);
+			return false;
+		}
 
 		auto handler = Microsoft::WRL::Make<CStartPointerHandler>(this, startHandle);
 		if (!handler)
