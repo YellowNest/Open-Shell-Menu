@@ -50,6 +50,28 @@ static TOOLINFO g_StartButtonTool;
 static bool g_bHotkeyShift;
 static int g_HotkeyCSM, g_HotkeyWSM, g_HotkeyShiftID, g_HotkeyCSMID, g_HotkeyWSMID;
 static HHOOK g_ProgHook, g_StartHook, g_StartMouseHook, g_AppManagerHook, g_NewWindowHook, g_StartMenuHook;
+
+enum
+{
+	WIN11_START_INPUT_FALLBACK,
+	WIN11_START_INPUT_PROBING,
+	WIN11_START_INPUT_ACTIVE,
+};
+
+static volatile LONG g_Win11StartInputState=WIN11_START_INPUT_FALLBACK;
+
+static UINT GetWin11StartInputMessage( void )
+{
+	static UINT message=RegisterWindowMessage(L"OpenShell.Win11StartInput");
+	return message;
+}
+
+static UINT GetWin11StartInputStateMessage( void )
+{
+	static UINT message=RegisterWindowMessage(L"OpenShell.Win11StartInputState");
+	return message;
+}
+
 static bool g_bAllProgramsTimer;
 static bool g_bInMenu;
 static DWORD g_LastClickTime;
@@ -3081,6 +3103,7 @@ static void InitStartMenuDLL( void )
 	g_StartHook=SetWindowsHookEx(WH_GETMESSAGE,HookDesktopThread,NULL,GetCurrentThreadId());
 	if (IsWin11())
 	{
+		InterlockedExchange(&g_Win11StartInputState,WIN11_START_INPUT_FALLBACK);
 		g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
 
 		// hook ShellRegisterHotKey to prevent twinui.dll to install shell hotkeys (Win, Ctrl+Esc)
@@ -3334,6 +3357,7 @@ static void CleanStartMenuDLL( void )
 	UnhookWindowsHookEx(g_StartHook);
 	if (g_StartMouseHook) UnhookWindowsHookEx(g_StartMouseHook);
 	g_StartMouseHook=NULL;
+	InterlockedExchange(&g_Win11StartInputState,WIN11_START_INPUT_FALLBACK);
 	if (g_AppManagerHook) UnhookWindowsHookEx(g_AppManagerHook);
 	g_AppManagerHook=NULL;
 	if (g_NewWindowHook) UnhookWindowsHookEx(g_NewWindowHook);
@@ -3621,33 +3645,96 @@ static LRESULT CALLBACK HookProgManThread( int code, WPARAM wParam, LPARAM lPara
 	return CallNextHookEx(NULL,code,wParam,lParam);
 }
 
-// WH_MOUSE hook for taskbar thread (Win11+)
+// WH_MOUSE fallback for the taskbar thread (Win11+).
+//
+// Once the XAML input route has proved that it receives pointer movement for
+// the native Start slot, the fallback is removed. While probing, movement is
+// allowed through so the XAML route can prove itself; button messages continue
+// to use the established hook path until that transition is complete.
 static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM lParam)
 {
 	if (code == HC_ACTION)
 	{
-		// we need to steal mouse messages that are issues in start button area
-		// so that they won't get to XAML framework that is handling original start button
-		auto info = (const MOUSEHOOKSTRUCT*)lParam;
+		LONG inputState=InterlockedCompareExchange(&g_Win11StartInputState,0,0);
+		auto info=(const MOUSEHOOKSTRUCT*)lParam;
+		auto taskBar=FindTaskBarInfoButton(info->hwnd);
+		if (!taskBar)
 		{
-			auto taskBar = FindTaskBarInfoButton(info->hwnd); // click on start button
-			if (!taskBar)
-			{
-				taskBar = FindTaskBarInfoBar(GetAncestor(info->hwnd, GA_ROOT)); // click on taskbar
-				if (taskBar && !PointAroundStartButton(taskBar->taskbarId))
-					taskBar = NULL;
-			}
+			taskBar=FindTaskBarInfoBar(GetAncestor(info->hwnd,GA_ROOT));
+			if (taskBar && !PointAroundStartButton(taskBar->taskbarId))
+				taskBar=NULL;
+		}
 
-			if (taskBar && (info->hwnd != taskBar->startButton) && taskBar->oldButton)
-			{
-				// steal messages from other than our custom button window
-				PostMessage(taskBar->oldButton, (UINT)wParam, 0, MAKELPARAM(info->pt.x, info->pt.y));
-				return 1;
-			}
+		if (taskBar && info->hwnd!=taskBar->startButton && taskBar->oldButton)
+		{
+			if (inputState==WIN11_START_INPUT_PROBING && wParam==WM_MOUSEMOVE)
+				return CallNextHookEx(NULL,code,wParam,lParam);
+
+			// Preserve the existing behavior until XAML routing is confirmed.
+			PostMessage(taskBar->oldButton,(UINT)wParam,0,MAKELPARAM(info->pt.x,info->pt.y));
+			return 1;
 		}
 	}
 
-	return CallNextHookEx(NULL, code, wParam, lParam);
+	return CallNextHookEx(NULL,code,wParam,lParam);
+}
+
+static void SetWin11StartInputState( LONG state )
+{
+	if (!IsWin11())
+		return;
+
+	InterlockedExchange(&g_Win11StartInputState,state);
+	if (state==WIN11_START_INPUT_ACTIVE)
+	{
+		if (g_StartMouseHook)
+		{
+			UnhookWindowsHookEx(g_StartMouseHook);
+			g_StartMouseHook=NULL;
+			LogToFile(STARTUP_LOG,L"Win11StartInput: XAML routing active; WH_MOUSE fallback removed");
+		}
+	}
+	else if (!g_StartMouseHook)
+	{
+		g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
+		LogToFile(STARTUP_LOG,L"Win11StartInput: WH_MOUSE fallback restored (%d)",state);
+	}
+}
+
+static bool RewriteWin11StartInputMessage( MSG *msg )
+{
+	TaskbarInfo *taskBar=FindTaskBarInfoBar(msg->hwnd);
+	if (!taskBar || !taskBar->oldButton)
+	{
+		SetWin11StartInputState(WIN11_START_INPUT_FALLBACK);
+		msg->message=WM_NULL;
+		return false;
+	}
+
+	UINT mouseMessage=(UINT)msg->wParam;
+	if (!((mouseMessage>=WM_MOUSEFIRST && mouseMessage<=WM_MOUSELAST) || mouseMessage==WM_MOUSELEAVE))
+	{
+		msg->message=WM_NULL;
+		return false;
+	}
+
+	POINT screenPoint={(short)LOWORD(msg->lParam),(short)HIWORD(msg->lParam)};
+	msg->hwnd=taskBar->oldButton;
+	msg->message=mouseMessage;
+	msg->wParam=0;
+	msg->pt=screenPoint;
+
+	if (mouseMessage==WM_MOUSELEAVE)
+	{
+		msg->lParam=0;
+	}
+	else
+	{
+		POINT clientPoint=screenPoint;
+		ScreenToClient(taskBar->oldButton,&clientPoint);
+		msg->lParam=MAKELPARAM(clientPoint.x,clientPoint.y);
+	}
+	return true;
 }
 
 // WH_GETMESSAGE hook for the taskbar thread
@@ -3657,6 +3744,18 @@ static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lPara
 	{
 		MSG *msg=(MSG*)lParam;
 		FindTaskBar();
+
+		if (msg->message==GetWin11StartInputStateMessage())
+		{
+			LONG state=(LONG)msg->wParam;
+			if (state>=WIN11_START_INPUT_FALLBACK && state<=WIN11_START_INPUT_ACTIVE)
+				SetWin11StartInputState(state);
+			msg->message=WM_NULL;
+			return CallNextHookEx(NULL,code,wParam,lParam);
+		}
+		if (msg->message==GetWin11StartInputMessage())
+			RewriteWin11StartInputMessage(msg);
+
 		if (IsSettingsMessage(msg))
 		{
 			msg->message=WM_NULL;
@@ -4088,7 +4187,7 @@ if (!g_bTrimHooks)
 			}
 			if (taskBar)
 			{
-				CPoint pt0(GetMessagePos());
+				CPoint pt0(msg->pt);
 				if (msg->message==WM_RBUTTONUP && msg->hwnd==taskBar->startButton && msg->lParam==MAKELPARAM(-1,-1))
 				{
 					RECT rc;
