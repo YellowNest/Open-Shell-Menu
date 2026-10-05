@@ -52,6 +52,7 @@ public:
 };
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
+static const UINT WM_OS_STARTBUTTON_REPROBE = WM_APP + 0x35C;
 
 enum
 {
@@ -491,14 +492,10 @@ public:
 			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_APPLY, 0, 0);
 	}
 
-	void ResetInputBridgeState( void )
+	void RequestInputBridgeReprobe( void )
 	{
-		for (size_t i = 0; i < m_InputRoutes.size(); i++)
-			m_InputRoutes[i].verified = false;
-		m_LastInputState = -1;
-		ReportInputBridgeState(
-			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) ?
-			WIN11_START_INPUT_PROBING : WIN11_START_INPUT_FALLBACK);
+		if (m_Dispatch)
+			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_REPROBE, 0, 0);
 	}
 
 	HRESULT OnStartPointer( InstanceHandle startHandle,
@@ -638,6 +635,16 @@ private:
 			return false;
 		return PostMessage(taskbar, GetWin11StartInputMessage(), mouseMessage,
 			MAKELPARAM(screenPoint.x, screenPoint.y)) != FALSE;
+	}
+
+	void ReprobeInputBridgeState( void )
+	{
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+			m_InputRoutes[i].verified = false;
+		m_LastInputState = -1;
+		ReportInputBridgeState(
+			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) ?
+			WIN11_START_INPUT_PROBING : WIN11_START_INPUT_FALLBACK);
 	}
 
 	void ReportInputBridgeState( LONG state )
@@ -983,6 +990,13 @@ private:
 			CREATESTRUCT *create = (CREATESTRUCT*)lParam;
 			tap = (CWin11StartButtonTap*)create->lpCreateParams;
 			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)tap);
+		}
+		if (msg == WM_OS_STARTBUTTON_REPROBE && tap)
+		{
+			tap->AddRef();
+			tap->ReprobeInputBridgeState();
+			tap->Release();
+			return 0;
 		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
@@ -1581,7 +1595,7 @@ extern "C" void StartWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
-		tap->ResetInputBridgeState();
+		tap->RequestInputBridgeReprobe();
 		tap->RequestApply(false);
 		tap->Release();
 		return;
@@ -1600,7 +1614,7 @@ extern "C" void UpdateWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	{
 		// Re-arm fallback/probing on every taskbar/settings update. Existing
 		// route verification may describe XAML handles from the previous layout.
-		tap->ResetInputBridgeState();
+		tap->RequestInputBridgeReprobe();
 		tap->RequestApply(false);
 		tap->Release();
 	}
