@@ -25,6 +25,7 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 static const GUID CLSID_OpenShellStartButtonTap =
@@ -40,6 +41,14 @@ IOpenShellDesktopWindowXamlSourceNative : public IUnknown
 public:
 	virtual HRESULT STDMETHODCALLTYPE AttachToWindow( HWND parentWnd ) = 0;
 	virtual HRESULT STDMETHODCALLTYPE get_WindowHandle( HWND *hWnd ) = 0;
+};
+
+MIDL_INTERFACE("d585bfe1-00ff-51be-ba1d-a1329956ea0a")
+IOpenShellDesktopWindowXamlSource : public IInspectable
+{
+public:
+	virtual HRESULT STDMETHODCALLTYPE get_Content(
+		ABI::Windows::UI::Xaml::IUIElement **value ) = 0;
 };
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
@@ -304,6 +313,7 @@ public:
 
 			EnterCriticalSection(&m_Lock);
 			m_Elements.clear();
+			m_XamlSources.clear();
 			m_PrimaryStart = 0;
 			m_NextDiscoveryOrder = 0;
 			LeaveCriticalSection(&m_Lock);
@@ -322,6 +332,7 @@ public:
 
 		EnterCriticalSection(&m_Lock);
 		m_Elements.clear();
+		m_XamlSources.clear();
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
 		LeaveCriticalSection(&m_Lock);
@@ -412,6 +423,7 @@ public:
 		EnterCriticalSection(&m_Lock);
 		if (mutationType == Remove)
 		{
+			m_XamlSources.erase(element.Handle);
 			auto it = m_Elements.find(element.Handle);
 			if (it != m_Elements.end())
 			{
@@ -444,6 +456,8 @@ public:
 				record.discoveryOrder = ++m_NextDiscoveryOrder;
 			}
 			m_Elements[element.Handle] = record;
+			if (record.type == L"Windows.UI.Xaml.Hosting.DesktopWindowXamlSource")
+				m_XamlSources.insert(element.Handle);
 
 			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
@@ -739,46 +753,56 @@ private:
 		return false;
 	}
 
-	HWND ResolveInputTaskbar( InstanceHandle startHandle, InstanceHandle *sourceHandle )
+	HWND ResolveInputTaskbar( InstanceHandle, InstanceHandle rootHandle,
+		ABI::Windows::UI::Xaml::IUIElement *rootElement, InstanceHandle *sourceHandle )
 	{
 		if (sourceHandle)
 			*sourceHandle = 0;
-		if (!m_Diagnostics)
+		if (!m_Diagnostics || !rootElement)
 			return NULL;
 
-		std::vector<InstanceHandle> ancestors;
+		CComPtr<IUnknown> rootIdentity;
+		if (FAILED(rootElement->QueryInterface(IID_PPV_ARGS(&rootIdentity))) || !rootIdentity)
+			return NULL;
+
+		std::vector<InstanceHandle> sources;
 		EnterCriticalSection(&m_Lock);
-		auto it = m_Elements.find(startHandle);
-		InstanceHandle current = it != m_Elements.end() ? it->second.parent : 0;
-		for (int depth = 0; depth < 64 && current; depth++)
-		{
-			ancestors.push_back(current);
-			auto parent = m_Elements.find(current);
-			if (parent == m_Elements.end())
-				break;
-			current = parent->second.parent;
-		}
+		for (auto it = m_XamlSources.begin(); it != m_XamlSources.end(); ++it)
+			sources.push_back(*it);
 		LeaveCriticalSection(&m_Lock);
 
-		for (auto it2 = ancestors.rbegin(); it2 != ancestors.rend(); ++it2)
+		for (size_t i = 0; i < sources.size(); i++)
 		{
 			CComPtr<IInspectable> inspectable;
-			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(*it2, &inspectable)) || !inspectable)
+			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(sources[i], &inspectable)) || !inspectable)
 				continue;
 
-			CComPtr<IOpenShellDesktopWindowXamlSourceNative> xamlSource;
-			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&xamlSource))) || !xamlSource)
+			CComPtr<IOpenShellDesktopWindowXamlSource> source;
+			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&source))) || !source)
+				continue;
+
+			CComPtr<ABI::Windows::UI::Xaml::IUIElement> content;
+			if (FAILED(source->get_Content(&content)) || !content)
+				continue;
+
+			CComPtr<IUnknown> contentIdentity;
+			if (FAILED(content->QueryInterface(IID_PPV_ARGS(&contentIdentity))) ||
+				contentIdentity != rootIdentity)
+				continue;
+
+			CComPtr<IOpenShellDesktopWindowXamlSourceNative> nativeSource;
+			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&nativeSource))) || !nativeSource)
 				continue;
 
 			HWND xamlHwnd = NULL;
-			if (FAILED(xamlSource->get_WindowHandle(&xamlHwnd)) || !xamlHwnd)
+			if (FAILED(nativeSource->get_WindowHandle(&xamlHwnd)) || !xamlHwnd)
 				continue;
 
 			HWND taskbar = FindTaskbarAncestor(xamlHwnd);
 			if (taskbar)
 			{
 				if (sourceHandle)
-					*sourceHandle = *it2;
+					*sourceHandle = sources[i];
 				return taskbar;
 			}
 		}
@@ -806,7 +830,8 @@ private:
 			return false;
 		if (!GetInputRoot(startHandle, &route.rootHandle, route.rootElement))
 			return false;
-		route.taskbar = ResolveInputTaskbar(startHandle, &route.sourceHandle);
+		route.taskbar = ResolveInputTaskbar(startHandle, route.rootHandle,
+			route.rootElement, &route.sourceHandle);
 		if (!route.taskbar)
 		{
 			LogToFile(STARTUP_LOG, L"Win11StartInput: unable to resolve taskbar HWND for handle %llu; keeping WH_MOUSE fallback",
@@ -1337,6 +1362,7 @@ private:
 	size_t m_ExpectedInputRoutes;
 	LONG m_LastInputState;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
+	std::unordered_set<InstanceHandle> m_XamlSources;
 	std::vector<StartInputRoute> m_InputRoutes;
 };
 
