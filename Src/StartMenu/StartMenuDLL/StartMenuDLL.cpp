@@ -72,6 +72,22 @@ static UINT GetWin11StartInputStateMessage( void )
 	return message;
 }
 
+static void DrainWin11StartInputMessages( void )
+{
+	if (!IsWin11())
+		return;
+
+	MSG msg;
+	const UINT inputMessage=GetWin11StartInputMessage();
+	const UINT stateMessage=GetWin11StartInputStateMessage();
+	while (PeekMessage(&msg,NULL,inputMessage,inputMessage,PM_REMOVE))
+	{
+	}
+	while (PeekMessage(&msg,NULL,stateMessage,stateMessage,PM_REMOVE))
+	{
+	}
+}
+
 static bool g_bAllProgramsTimer;
 static bool g_bInMenu;
 static DWORD g_LastClickTime;
@@ -3315,6 +3331,11 @@ static DWORD WINAPI ExitThreadProc( void *param )
 static void CleanStartMenuDLL( void )
 {
 	StopWin11StartButtonMonitor();
+
+	// Stop the helper first, then remove any bridge messages that were already
+	// queued on Explorer's taskbar thread. This prevents stale pointer/state
+	// messages from surviving a StartMenuDLL unload/reload cycle.
+	DrainWin11StartInputMessages();
 
 	ClearIatHook(g_DwmpBTRHook);
 	g_DwmpBTRHook=NULL;
