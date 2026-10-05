@@ -493,7 +493,12 @@ public:
 
 	void ResetInputBridgeState( void )
 	{
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+			m_InputRoutes[i].verified = false;
 		m_LastInputState = -1;
+		ReportInputBridgeState(
+			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) ?
+			WIN11_START_INPUT_PROBING : WIN11_START_INPUT_FALLBACK);
 	}
 
 	HRESULT OnStartPointer( InstanceHandle startHandle,
@@ -1593,6 +1598,9 @@ extern "C" void UpdateWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
+		// Re-arm fallback/probing on every taskbar/settings update. Existing
+		// route verification may describe XAML handles from the previous layout.
+		tap->ResetInputBridgeState();
 		tap->RequestApply(false);
 		tap->Release();
 	}
