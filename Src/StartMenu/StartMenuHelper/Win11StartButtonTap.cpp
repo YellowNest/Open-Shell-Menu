@@ -15,8 +15,16 @@
 #include "..\StartMenuDLL\LogManager.h"
 
 #include <Windows.UI.Xaml.h>
+#include <Windows.Devices.Input.h>
+#include <Windows.UI.Xaml.Input.h>
+#include <Windows.UI.Input.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <roapi.h>
+#include <winstring.h>
+#include <wrl.h>
+#include <wrl/client.h>
+#include <wrl/implements.h>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +32,73 @@ static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
+static const UINT WM_OS_STARTBUTTON_REPROBE = WM_APP + 0x35C;
+
+enum
+{
+	WIN11_START_INPUT_FALLBACK,
+	WIN11_START_INPUT_PROBING,
+	WIN11_START_INPUT_ACTIVE,
+};
+
+static UINT GetWin11StartInputMessage( void )
+{
+	static UINT message = RegisterWindowMessage(L"OpenShell.Win11StartInput");
+	return message;
+}
+
+static UINT GetWin11StartInputStateMessage( void )
+{
+	static UINT message = RegisterWindowMessage(L"OpenShell.Win11StartInputState");
+	return message;
+}
+
+static bool IsTaskbarWindow( HWND hwnd )
+{
+	if (!hwnd)
+		return false;
+	wchar_t className[64] = {};
+	if (!GetClassName(hwnd, className, _countof(className)))
+		return false;
+	return wcscmp(className, L"Shell_TrayWnd") == 0 ||
+		wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
+}
+
+struct TaskbarPointSearch
+{
+	POINT point;
+	HWND taskbar;
+};
+
+static BOOL CALLBACK FindTaskbarAtPointProc( HWND hwnd, LPARAM lParam )
+{
+	TaskbarPointSearch *search = (TaskbarPointSearch*)lParam;
+	if (!search || !IsTaskbarWindow(hwnd))
+		return TRUE;
+
+	RECT rect = {};
+	if (GetWindowRect(hwnd, &rect) && PtInRect(&rect, search->point))
+	{
+		search->taskbar = hwnd;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static bool IsPointInTaskbar( HWND taskbar, POINT point )
+{
+	if (!taskbar || !IsWindow(taskbar) || !IsTaskbarWindow(taskbar))
+		return false;
+	RECT rect = {};
+	return GetWindowRect(taskbar, &rect) && PtInRect(&rect, point);
+}
+
+static HWND FindTaskbarAtPoint( POINT point )
+{
+	TaskbarPointSearch search = { point, NULL };
+	EnumWindows(FindTaskbarAtPointProc, (LPARAM)&search);
+	return search.taskbar;
+}
 
 static volatile LONG g_StartButtonActive = 0;
 static volatile LONG g_StartButtonEnabled = 0;
@@ -60,7 +135,62 @@ struct StartElement
 	}
 };
 
+struct StartInputRoute
+{
+	InstanceHandle startHandle;
+	InstanceHandle rootHandle;
+	CComPtr<ABI::Windows::UI::Xaml::IUIElement> startElement;
+	CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> startFramework;
+	CComPtr<ABI::Windows::UI::Xaml::IUIElement> rootElement;
+	CComPtr<IInspectable> handler;
+	bool verified;
+	bool pointerInside;
+	HWND taskbar;
+	DWORD lastPressTime;
+	POINT lastPressPoint;
+	UINT lastPressMessage;
+
+	StartInputRoute( void )
+	{
+		startHandle = 0;
+		rootHandle = 0;
+		verified = false;
+		pointerInside = false;
+		taskbar = NULL;
+		lastPressTime = 0;
+		lastPressPoint.x = 0;
+		lastPressPoint.y = 0;
+		lastPressMessage = 0;
+	}
+};
+
 class CWin11StartButtonTap;
+
+class CStartPointerHandler:
+	public Microsoft::WRL::RuntimeClass<
+		Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::WinRtClassicComMix>,
+		ABI::Windows::UI::Xaml::Input::IPointerEventHandler>
+{
+public:
+	CStartPointerHandler( CWin11StartButtonTap *owner, InstanceHandle startHandle );
+	~CStartPointerHandler( void );
+
+	HRESULT STDMETHODCALLTYPE GetTrustLevel( TrustLevel *trustLevel ) override
+	{
+		if (!trustLevel)
+			return E_POINTER;
+		*trustLevel = BaseTrust;
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE Invoke( IInspectable *sender,
+		ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args ) override;
+
+private:
+	CWin11StartButtonTap *m_Owner;
+	InstanceHandle m_StartHandle;
+};
+
 static CWin11StartButtonTap *g_Tap = NULL;
 static SRWLOCK g_TapLock = SRWLOCK_INIT;
 
@@ -99,12 +229,16 @@ public:
 		m_Dispatch = NULL;
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
+		m_ExpectedInputRoutes = 0;
+		m_LastInputState = -1;
 		InitializeCriticalSection(&m_Lock);
 		_AtlModule.Lock();
 	}
 
 	~CWin11StartButtonTap( void )
 	{
+		if (m_Dispatch && GetWindowThreadProcessId(m_Dispatch, NULL) == GetCurrentThreadId())
+			DetachAllInputRoutes();
 		if (m_Visual && m_Advised)
 			m_Visual->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
 		if (m_Dispatch && GetWindowThreadProcessId(m_Dispatch, NULL) == GetCurrentThreadId())
@@ -163,8 +297,17 @@ public:
 			}
 			m_Advised = false;
 		}
+		DetachAllInputRoutes();
+		m_UIElementStatics.Release();
+		m_PointerEnteredEvent.Release();
+		m_PointerMovedEvent.Release();
+		m_PointerPressedEvent.Release();
+		m_PointerReleasedEvent.Release();
+		m_PointerExitedEvent.Release();
+		m_Diagnostics.Release();
 		m_Visual.Release();
 		m_Site.Release();
+		m_LastInputState = -1;
 
 		if (!site)
 		{
@@ -206,15 +349,24 @@ public:
 		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
 		if (FAILED(hr) || !m_Visual)
 		{
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			InterlockedExchange(&g_ConnectStarted, 0);
 			return hr;
 		}
 
+		HRESULT diagnosticsHr = site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+		if (FAILED(diagnosticsHr))
+		{
+			m_Diagnostics.Release();
+			LogToFile(STARTUP_LOG, L"Win11StartInput: IXamlDiagnostics unavailable 0x%08X; keeping WH_MOUSE fallback", diagnosticsHr);
+		}
+
 		if (!CreateDispatchWindow())
 		{
 			DWORD error = GetLastError();
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -246,6 +398,7 @@ public:
 				SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
 				DestroyWindow(dispatch);
 			}
+			m_Diagnostics.Release();
 			m_Visual.Release();
 			m_Site.Release();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -269,6 +422,7 @@ public:
 		// VisualElement is an [in] parameter. The XAML diagnostics runtime owns
 		// the BSTR fields; copy the values we need but never free callback input.
 		bool interesting = false;
+		bool routeTopologyChanged = false;
 
 		EnterCriticalSection(&m_Lock);
 		if (mutationType == Remove)
@@ -305,12 +459,33 @@ public:
 				record.discoveryOrder = ++m_NextDiscoveryOrder;
 			}
 			m_Elements[element.Handle] = record;
+			const bool isStartCandidate = IsStartControlCandidate(record);
 
-			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
+			routeTopologyChanged = isStartCandidate;
+			interesting = routeTopologyChanged || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
 		LeaveCriticalSection(&m_Lock);
 
+		// Do not mutate XAML routed-event handler collections from inside the
+		// visual-tree callback. Any topology change that can alter the required
+		// Start routes must first re-arm the WH_MOUSE fallback. This closes the
+		// window between a new taskbar/XAML source appearing and the asynchronous
+		// ApplyState pass recalculating whether every native Start slot is routed.
+		if (mutationType == Add && routeTopologyChanged &&
+			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) && !m_InputRoutes.empty())
+		{
+			ReportInputBridgeState(WIN11_START_INPUT_PROBING);
+		}
+
+		// If an active route is disappearing, queue the fallback transition first;
+		// the posted apply pass then removes the stale route after the diagnostics
+		// callback has unwound.
+		if (mutationType == Remove && InputRouteUsesHandle(element.Handle))
+		{
+			ReportInputBridgeState(WIN11_START_INPUT_PROBING);
+			interesting = true;
+		}
 		if (interesting)
 			RequestApply(false);
 		return S_OK;
@@ -331,6 +506,191 @@ public:
 			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_APPLY, 0, 0);
 	}
 
+	void RequestInputBridgeReprobe( void )
+	{
+		if (m_Dispatch)
+			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_REPROBE, 0, 0);
+	}
+
+	HRESULT OnStartPointer( InstanceHandle startHandle,
+		ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args )
+	{
+		if (!args || !InterlockedCompareExchange(&g_StartButtonActive, 0, 0) ||
+			!InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0))
+			return S_OK;
+
+		StartInputRoute *route = FindInputRoute(startHandle);
+		if (!route)
+			return S_OK;
+
+		CComPtr<ABI::Windows::UI::Xaml::Input::IPointer> pointer;
+		HRESULT hr = args->get_Pointer(&pointer);
+		if (FAILED(hr) || !pointer)
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		ABI::Windows::Devices::Input::PointerDeviceType deviceType =
+			ABI::Windows::Devices::Input::PointerDeviceType_Touch;
+		hr = pointer->get_PointerDeviceType(&deviceType);
+		if (FAILED(hr))
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+		if (deviceType != ABI::Windows::Devices::Input::PointerDeviceType_Mouse)
+			return S_OK;
+
+		// This bridge currently routes mouse input only. GetCursorPos is sufficient
+		// for the screen-space mouse location and, unlike GetPointerInfo, does not
+		// add a Windows 8+ User32 import to StartMenuHelper.
+		POINT screenPoint = {};
+		if (!GetCursorPos(&screenPoint))
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		CComPtr<ABI::Windows::UI::Input::IPointerPoint> point;
+		hr = args->GetCurrentPoint(route->startElement, &point);
+		if (FAILED(hr) || !point)
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		ABI::Windows::Foundation::Point position = {};
+		DOUBLE width = 0;
+		DOUBLE height = 0;
+		if (FAILED(point->get_Position(&position)) ||
+			FAILED(route->startFramework->get_ActualWidth(&width)) ||
+			FAILED(route->startFramework->get_ActualHeight(&height)))
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		bool inside = position.X >= 0 && position.Y >= 0 &&
+			position.X < width && position.Y < height;
+		if (!inside)
+		{
+			if (route->pointerInside && route->taskbar)
+				PostInputMessage(route->taskbar, WM_MOUSELEAVE, screenPoint);
+			route->pointerInside = false;
+			return S_OK;
+		}
+
+		HWND taskbar = route->taskbar;
+		if (!IsPointInTaskbar(taskbar, screenPoint))
+			taskbar = FindTaskbarAtPoint(screenPoint);
+		if (!taskbar)
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: no taskbar at pointer position %d,%d", screenPoint.x, screenPoint.y);
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		UINT mouseMessage = WM_MOUSEMOVE;
+		CComPtr<ABI::Windows::UI::Input::IPointerPointProperties> properties;
+		if (SUCCEEDED(point->get_Properties(&properties)) && properties)
+		{
+			ABI::Windows::UI::Input::PointerUpdateKind updateKind =
+				ABI::Windows::UI::Input::PointerUpdateKind_Other;
+			if (SUCCEEDED(properties->get_PointerUpdateKind(&updateKind)))
+			{
+				switch (updateKind)
+				{
+				case ABI::Windows::UI::Input::PointerUpdateKind_LeftButtonPressed:
+					mouseMessage = WM_LBUTTONDOWN;
+					break;
+				case ABI::Windows::UI::Input::PointerUpdateKind_LeftButtonReleased:
+					mouseMessage = WM_LBUTTONUP;
+					break;
+				case ABI::Windows::UI::Input::PointerUpdateKind_RightButtonPressed:
+					mouseMessage = WM_RBUTTONDOWN;
+					break;
+				case ABI::Windows::UI::Input::PointerUpdateKind_RightButtonReleased:
+					mouseMessage = WM_RBUTTONUP;
+					break;
+				case ABI::Windows::UI::Input::PointerUpdateKind_MiddleButtonPressed:
+					mouseMessage = WM_MBUTTONDOWN;
+					break;
+				case ABI::Windows::UI::Input::PointerUpdateKind_MiddleButtonReleased:
+					mouseMessage = WM_MBUTTONUP;
+					break;
+				default:
+					break;
+				}
+			}
+		}
+
+		// WH_MOUSE used to deliver Windows-generated double-click messages.
+		// Routed pointer events expose button transitions instead, so preserve the
+		// same behavior before retiring the hook.
+		UINT doubleClickMessage = 0;
+		if (mouseMessage == WM_LBUTTONDOWN)
+			doubleClickMessage = WM_LBUTTONDBLCLK;
+		else if (mouseMessage == WM_RBUTTONDOWN)
+			doubleClickMessage = WM_RBUTTONDBLCLK;
+		else if (mouseMessage == WM_MBUTTONDOWN)
+			doubleClickMessage = WM_MBUTTONDBLCLK;
+
+		if (doubleClickMessage)
+		{
+			DWORD now = GetTickCount();
+			LONG dx = screenPoint.x - route->lastPressPoint.x;
+			LONG dy = screenPoint.y - route->lastPressPoint.y;
+			if (dx < 0) dx = -dx;
+			if (dy < 0) dy = -dy;
+			const int maxDx = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
+			const int maxDy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+
+			if (route->lastPressMessage == mouseMessage &&
+				now - route->lastPressTime <= GetDoubleClickTime() &&
+				dx <= maxDx && dy <= maxDy)
+			{
+				mouseMessage = doubleClickMessage;
+				route->lastPressTime = 0;
+				route->lastPressMessage = 0;
+			}
+			else
+			{
+				route->lastPressTime = now;
+				route->lastPressPoint = screenPoint;
+				route->lastPressMessage = mouseMessage;
+			}
+		}
+
+		// Prove that XAML accepts suppression before forwarding the event and
+		// before this route can retire WH_MOUSE. If this ever fails, prefer a
+		// single swallowed event plus restored fallback over double-activating
+		// both Open-Shell and the native Start button.
+		hr = args->put_Handled(TRUE);
+		if (FAILED(hr))
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: failed to mark routed pointer handled 0x%08X", hr);
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		if (!PostInputMessage(taskbar, mouseMessage, screenPoint))
+		{
+			InvalidateInputRoute(*route);
+			return S_OK;
+		}
+
+		route->pointerInside = true;
+		route->taskbar = taskbar;
+
+		if (!route->verified)
+		{
+			route->verified = true;
+			EvaluateInputBridgeState();
+		}
+		return S_OK;
+	}
+
 	HRESULT Deactivate( void )
 	{
 		// The diagnostics runtime retains this site beyond Open-Shell's lifetime.
@@ -343,6 +703,327 @@ public:
 	}
 
 private:
+	bool PostInputMessage( HWND taskbar, UINT mouseMessage, POINT screenPoint )
+	{
+		if (!taskbar || !IsWindow(taskbar))
+			return false;
+
+		LPARAM position = 0;
+		if (mouseMessage != WM_MOUSELEAVE)
+		{
+			POINT taskbarPoint = screenPoint;
+			if (!ScreenToClient(taskbar, &taskbarPoint))
+				return false;
+			position = MAKELPARAM(taskbarPoint.x, taskbarPoint.y);
+		}
+		UINT message = GetWin11StartInputMessage();
+		return message && PostMessage(taskbar, message, mouseMessage, position) != FALSE;
+	}
+
+	void ReprobeInputBridgeState( void )
+	{
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+			m_InputRoutes[i].verified = false;
+		m_LastInputState = -1;
+		ReportInputBridgeState(
+			InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) ?
+			WIN11_START_INPUT_PROBING : WIN11_START_INPUT_FALLBACK);
+	}
+
+	void ReportInputBridgeState( LONG state )
+	{
+		if (!InterlockedCompareExchange(&g_StartButtonActive, 0, 0))
+		{
+			m_LastInputState = -1;
+			return;
+		}
+		if (m_LastInputState == state)
+			return;
+
+		UINT message = GetWin11StartInputStateMessage();
+		HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
+		if (message && taskbar && PostMessage(taskbar, message, state, 0))
+		{
+			m_LastInputState = state;
+			LogToFile(STARTUP_LOG, L"Win11StartInput: routing state %d", state);
+		}
+	}
+
+	StartInputRoute *FindInputRoute( InstanceHandle startHandle )
+	{
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+			if (m_InputRoutes[i].startHandle == startHandle)
+				return &m_InputRoutes[i];
+		return NULL;
+	}
+
+	bool InputRouteUsesHandle( InstanceHandle handle ) const
+	{
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+			if (m_InputRoutes[i].startHandle == handle ||
+				m_InputRoutes[i].rootHandle == handle)
+				return true;
+		return false;
+	}
+
+	void InvalidateInputRoute( StartInputRoute &route )
+	{
+		route.verified = false;
+		ReportInputBridgeState(WIN11_START_INPUT_PROBING);
+	}
+
+	bool EnsureUIElementStatics( void )
+	{
+		if (m_UIElementStatics && m_PointerEnteredEvent && m_PointerMovedEvent &&
+			m_PointerPressedEvent && m_PointerReleasedEvent && m_PointerExitedEvent)
+			return true;
+
+		// Keep StartMenuHelper loadable on pre-Windows-8 systems. These WinRT
+		// entry points are resolved only when the Windows 11 XAML path is active,
+		// rather than becoming static DLL imports.
+		typedef HRESULT (WINAPI *WindowsCreateString_t)( PCNZWCH, UINT32, HSTRING* );
+		typedef HRESULT (WINAPI *WindowsDeleteString_t)( HSTRING );
+		typedef HRESULT (WINAPI *RoGetActivationFactory_t)( HSTRING, REFIID, void** );
+
+		HMODULE combase = GetModuleHandle(L"combase.dll");
+		if (!combase)
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: combase is unavailable; keeping WH_MOUSE fallback");
+			return false;
+		}
+
+		WindowsCreateString_t createString =
+			(WindowsCreateString_t)GetProcAddress(combase, "WindowsCreateString");
+		WindowsDeleteString_t deleteString =
+			(WindowsDeleteString_t)GetProcAddress(combase, "WindowsDeleteString");
+		RoGetActivationFactory_t getActivationFactory =
+			(RoGetActivationFactory_t)GetProcAddress(combase, "RoGetActivationFactory");
+		if (!createString || !deleteString || !getActivationFactory)
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: WinRT activation exports are unavailable; keeping WH_MOUSE fallback");
+			return false;
+		}
+
+		static const wchar_t CLASS_NAME[] = L"Windows.UI.Xaml.UIElement";
+		HSTRING className = NULL;
+		HRESULT hr = createString(CLASS_NAME, _countof(CLASS_NAME) - 1, &className);
+		if (FAILED(hr))
+			return false;
+
+		hr = getActivationFactory(className, __uuidof(ABI::Windows::UI::Xaml::IUIElementStatics),
+			(void**)&m_UIElementStatics);
+		deleteString(className);
+		if (FAILED(hr) || !m_UIElementStatics)
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: UIElement statics unavailable 0x%08X", hr);
+			return false;
+		}
+
+		if (FAILED(m_UIElementStatics->get_PointerEnteredEvent(&m_PointerEnteredEvent)) ||
+			FAILED(m_UIElementStatics->get_PointerMovedEvent(&m_PointerMovedEvent)) ||
+			FAILED(m_UIElementStatics->get_PointerPressedEvent(&m_PointerPressedEvent)) ||
+			FAILED(m_UIElementStatics->get_PointerReleasedEvent(&m_PointerReleasedEvent)) ||
+			FAILED(m_UIElementStatics->get_PointerExitedEvent(&m_PointerExitedEvent)))
+		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: pointer routed-event metadata unavailable");
+			m_PointerEnteredEvent.Release();
+			m_PointerMovedEvent.Release();
+			m_PointerPressedEvent.Release();
+			m_PointerReleasedEvent.Release();
+			m_PointerExitedEvent.Release();
+			m_UIElementStatics.Release();
+			return false;
+		}
+		return true;
+	}
+
+	bool GetInputRoot( InstanceHandle startHandle, InstanceHandle *rootHandle,
+		CComPtr<ABI::Windows::UI::Xaml::IUIElement> &rootElement )
+	{
+		if (!m_Diagnostics)
+			return false;
+
+		std::vector<InstanceHandle> ancestors;
+		EnterCriticalSection(&m_Lock);
+		auto it = m_Elements.find(startHandle);
+		InstanceHandle current = it != m_Elements.end() ? it->second.parent : 0;
+		for (int depth = 0; depth < 64 && current; depth++)
+		{
+			ancestors.push_back(current);
+			auto parent = m_Elements.find(current);
+			if (parent == m_Elements.end())
+				break;
+			current = parent->second.parent;
+		}
+		LeaveCriticalSection(&m_Lock);
+
+		for (auto it2 = ancestors.rbegin(); it2 != ancestors.rend(); ++it2)
+		{
+			CComPtr<IInspectable> inspectable;
+			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(*it2, &inspectable)) || !inspectable)
+				continue;
+
+			CComPtr<ABI::Windows::UI::Xaml::IUIElement> element;
+			if (SUCCEEDED(inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement),
+				(void**)&element)) && element)
+			{
+				*rootHandle = *it2;
+				rootElement = element;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool AttachInputRoute( InstanceHandle startHandle )
+	{
+		if (FindInputRoute(startHandle))
+			return true;
+		if (!m_Diagnostics || !EnsureUIElementStatics())
+			return false;
+
+		CComPtr<IInspectable> inspectable;
+		if (FAILED(m_Diagnostics->GetIInspectableFromHandle(startHandle, &inspectable)) || !inspectable)
+			return false;
+
+		StartInputRoute route;
+		route.startHandle = startHandle;
+		if (FAILED(inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement),
+			(void**)&route.startElement)) || !route.startElement)
+			return false;
+		if (FAILED(inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IFrameworkElement),
+			(void**)&route.startFramework)) || !route.startFramework)
+			return false;
+		if (!GetInputRoot(startHandle, &route.rootHandle, route.rootElement))
+			return false;
+
+		auto handler = Microsoft::WRL::Make<CStartPointerHandler>(this, startHandle);
+		if (!handler)
+			return false;
+		HRESULT hr = handler->QueryInterface(IID_PPV_ARGS(&route.handler));
+		if (FAILED(hr) || !route.handler)
+			return false;
+
+		hr = route.rootElement->AddHandler(m_PointerEnteredEvent, route.handler, TRUE);
+		if (SUCCEEDED(hr))
+			hr = route.rootElement->AddHandler(m_PointerMovedEvent, route.handler, TRUE);
+		if (SUCCEEDED(hr))
+			hr = route.rootElement->AddHandler(m_PointerPressedEvent, route.handler, TRUE);
+		if (SUCCEEDED(hr))
+			hr = route.rootElement->AddHandler(m_PointerReleasedEvent, route.handler, TRUE);
+		if (SUCCEEDED(hr))
+			hr = route.rootElement->AddHandler(m_PointerExitedEvent, route.handler, TRUE);
+		if (FAILED(hr))
+		{
+			route.rootElement->RemoveHandler(m_PointerEnteredEvent, route.handler);
+			route.rootElement->RemoveHandler(m_PointerMovedEvent, route.handler);
+			route.rootElement->RemoveHandler(m_PointerPressedEvent, route.handler);
+			route.rootElement->RemoveHandler(m_PointerReleasedEvent, route.handler);
+			route.rootElement->RemoveHandler(m_PointerExitedEvent, route.handler);
+			LogToFile(STARTUP_LOG, L"Win11StartInput: routed handler attach failed 0x%08X", hr);
+			return false;
+		}
+
+		m_InputRoutes.push_back(route);
+		LogToFile(STARTUP_LOG, L"Win11StartInput: route attached for handle %llu via root %llu",
+			(unsigned long long)startHandle, (unsigned long long)route.rootHandle);
+		return true;
+	}
+
+	void DetachInputRoute( size_t index )
+	{
+		if (index >= m_InputRoutes.size())
+			return;
+		StartInputRoute &route = m_InputRoutes[index];
+
+		if (route.pointerInside && route.taskbar)
+		{
+			POINT point = {};
+			GetCursorPos(&point);
+			PostInputMessage(route.taskbar, WM_MOUSELEAVE, point);
+		}
+
+		if (route.rootElement && route.handler)
+		{
+			if (m_PointerEnteredEvent) route.rootElement->RemoveHandler(m_PointerEnteredEvent, route.handler);
+			if (m_PointerMovedEvent) route.rootElement->RemoveHandler(m_PointerMovedEvent, route.handler);
+			if (m_PointerPressedEvent) route.rootElement->RemoveHandler(m_PointerPressedEvent, route.handler);
+			if (m_PointerReleasedEvent) route.rootElement->RemoveHandler(m_PointerReleasedEvent, route.handler);
+			if (m_PointerExitedEvent) route.rootElement->RemoveHandler(m_PointerExitedEvent, route.handler);
+		}
+		m_InputRoutes.erase(m_InputRoutes.begin() + index);
+	}
+
+	void DetachAllInputRoutes( void )
+	{
+		while (!m_InputRoutes.empty())
+			DetachInputRoute(m_InputRoutes.size() - 1);
+		m_ExpectedInputRoutes = 0;
+	}
+
+	void SyncInputRoutes( const std::vector<InstanceHandle> &targets )
+	{
+		m_ExpectedInputRoutes = targets.size();
+
+		for (size_t i = 0; i < m_InputRoutes.size();)
+		{
+			bool keep = false;
+			for (size_t j = 0; j < targets.size(); j++)
+				if (targets[j] == m_InputRoutes[i].startHandle)
+				{
+					keep = true;
+					break;
+				}
+
+			// Visual-tree removals are applied after the diagnostics callback
+			// unwinds. A root can disappear before its Start descendant is reported
+			// removed, so validate both handles before retaining the route.
+			if (keep)
+			{
+				EnterCriticalSection(&m_Lock);
+				keep = m_Elements.find(m_InputRoutes[i].startHandle) != m_Elements.end() &&
+					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end();
+				LeaveCriticalSection(&m_Lock);
+			}
+
+			if (!keep)
+				DetachInputRoute(i);
+			else
+				i++;
+		}
+
+		for (size_t i = 0; i < targets.size(); i++)
+			if (!FindInputRoute(targets[i]))
+				AttachInputRoute(targets[i]);
+	}
+
+	void EvaluateInputBridgeState( void )
+	{
+		if (!InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) ||
+			!m_ExpectedInputRoutes || m_InputRoutes.size() != m_ExpectedInputRoutes)
+		{
+			ReportInputBridgeState(WIN11_START_INPUT_FALLBACK);
+			return;
+		}
+
+		bool verified = true;
+		EnterCriticalSection(&m_Lock);
+		for (size_t i = 0; i < m_InputRoutes.size(); i++)
+		{
+			auto element = m_Elements.find(m_InputRoutes[i].startHandle);
+			if (element == m_Elements.end() || !element->second.hitTestOverride)
+			{
+				verified = false;
+				break;
+			}
+			if (!m_InputRoutes[i].verified)
+				verified = false;
+		}
+		LeaveCriticalSection(&m_Lock);
+
+		ReportInputBridgeState(verified ? WIN11_START_INPUT_ACTIVE : WIN11_START_INPUT_PROBING);
+	}
+
 	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 	{
 		CWin11StartButtonTap *tap = (CWin11StartButtonTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -352,11 +1033,22 @@ private:
 			tap = (CWin11StartButtonTap*)create->lpCreateParams;
 			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)tap);
 		}
+		if (msg == WM_OS_STARTBUTTON_REPROBE && tap)
+		{
+			tap->AddRef();
+			tap->ReprobeInputBridgeState();
+			tap->Release();
+			return 0;
+		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
+			// GWLP_USERDATA is a raw pointer. Hold the TAP alive while ApplyState
+			// may detach the last routed-event handler that also references it.
+			tap->AddRef();
 			bool enabled = InterlockedCompareExchange(&g_StartButtonActive, 0, 0) != 0 &&
 				InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) != 0;
 			tap->ApplyState(enabled);
+			tap->Release();
 			return 0;
 		}
 		return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -632,6 +1324,31 @@ private:
 
 		const bool allTaskbars = InterlockedCompareExchange(&g_AllTaskbars, 0, 0) != 0;
 
+		size_t startControlCount = 0;
+		for (size_t i = 0; i < elements.size(); i++)
+			if (elements[i].second.isStartControl)
+				startControlCount++;
+
+		// The fallback hook is thread-global. It can be retired only when every
+		// native Start slot has an Open-Shell replacement/input route. With
+		// multiple taskbars and AllTaskbars disabled, secondary native Start
+		// controls must remain hit-testable for touch/pen and keep the established
+		// WH_MOUSE fallback for mouse input.
+		const bool canRetireMouseHook = allTaskbars || startControlCount <= 1;
+		std::vector<InstanceHandle> inputTargets;
+		if (enabled && canRetireMouseHook)
+		{
+			for (size_t i = 0; i < elements.size(); i++)
+			{
+				if (!elements[i].second.isStartControl)
+					continue;
+				InstanceHandle handle = elements[i].first;
+				if (allTaskbars || !primaryStart || handle == primaryStart)
+					inputTargets.push_back(handle);
+			}
+		}
+		SyncInputRoutes(inputTargets);
+
 		for (size_t i = 0; i < elements.size(); i++)
 		{
 			InstanceHandle handle = elements[i].first;
@@ -694,6 +1411,8 @@ private:
 				}
 			}
 		}
+
+		EvaluateInputBridgeState();
 	}
 
 	LONG m_Refs;
@@ -702,10 +1421,39 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
+	CComPtr<ABI::Windows::UI::Xaml::IUIElementStatics> m_UIElementStatics;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_PointerEnteredEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_PointerMovedEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_PointerPressedEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_PointerReleasedEvent;
+	CComPtr<ABI::Windows::UI::Xaml::IRoutedEvent> m_PointerExitedEvent;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
+	size_t m_ExpectedInputRoutes;
+	LONG m_LastInputState;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
+	std::vector<StartInputRoute> m_InputRoutes;
 };
+
+CStartPointerHandler::CStartPointerHandler( CWin11StartButtonTap *owner, InstanceHandle startHandle )
+	: m_Owner(owner), m_StartHandle(startHandle)
+{
+	if (m_Owner)
+		m_Owner->AddRef();
+}
+
+CStartPointerHandler::~CStartPointerHandler( void )
+{
+	if (m_Owner)
+		m_Owner->Release();
+}
+
+HRESULT STDMETHODCALLTYPE CStartPointerHandler::Invoke( IInspectable *,
+	ABI::Windows::UI::Xaml::Input::IPointerRoutedEventArgs *args )
+{
+	return m_Owner ? m_Owner->OnStartPointer(m_StartHandle, args) : S_OK;
+}
 
 static CWin11StartButtonTap *GetTapRef( void )
 {
@@ -888,6 +1636,7 @@ extern "C" void StartWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
+		tap->RequestInputBridgeReprobe();
 		tap->RequestApply(false);
 		tap->Release();
 		return;
@@ -904,6 +1653,9 @@ extern "C" void UpdateWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
+		// Re-arm fallback/probing on every taskbar/settings update. Existing
+		// route verification may describe XAML handles from the previous layout.
+		tap->RequestInputBridgeReprobe();
 		tap->RequestApply(false);
 		tap->Release();
 	}
