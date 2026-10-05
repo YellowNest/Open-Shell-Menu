@@ -26,31 +26,10 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
-
-// windows.ui.xaml.hosting.desktopwindowxamlsource.h exposes this interface
-// through projection-specific declarations that do not compose cleanly with
-// this ATL project. Keep the documented COM ABI local instead of pulling a
-// second WinRT projection into StartMenuHelper.
-MIDL_INTERFACE("3cbcf1bf-2f76-4e9c-96ab-e84b37972554")
-IOpenShellDesktopWindowXamlSourceNative : public IUnknown
-{
-public:
-	virtual HRESULT STDMETHODCALLTYPE AttachToWindow( HWND parentWnd ) = 0;
-	virtual HRESULT STDMETHODCALLTYPE get_WindowHandle( HWND *hWnd ) = 0;
-};
-
-MIDL_INTERFACE("d585bfe1-00ff-51be-ba1d-a1329956ea0a")
-IOpenShellDesktopWindowXamlSource : public IInspectable
-{
-public:
-	virtual HRESULT STDMETHODCALLTYPE get_Content(
-		ABI::Windows::UI::Xaml::IUIElement **value ) = 0;
-};
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 static const UINT WM_OS_STARTBUTTON_REPROBE = WM_APP + 0x35C;
@@ -85,20 +64,32 @@ static bool IsTaskbarWindow( HWND hwnd )
 		wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
 }
 
-static HWND FindTaskbarAncestor( HWND hwnd )
+struct TaskbarPointSearch
 {
-	for (int depth = 0; hwnd && depth < 16; depth++)
-	{
-		if (IsTaskbarWindow(hwnd))
-			return hwnd;
-		HWND parent = GetParent(hwnd);
-		if (!parent)
-			break;
-		hwnd = parent;
-	}
+	POINT point;
+	HWND taskbar;
+};
 
-	HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
-	return IsTaskbarWindow(root) ? root : NULL;
+static BOOL CALLBACK FindTaskbarAtPointProc( HWND hwnd, LPARAM lParam )
+{
+	TaskbarPointSearch *search = (TaskbarPointSearch*)lParam;
+	if (!search || !IsTaskbarWindow(hwnd))
+		return TRUE;
+
+	RECT rect = {};
+	if (GetWindowRect(hwnd, &rect) && PtInRect(&rect, search->point))
+	{
+		search->taskbar = hwnd;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static HWND FindTaskbarAtPoint( POINT point )
+{
+	TaskbarPointSearch search = { point, NULL };
+	EnumWindows(FindTaskbarAtPointProc, (LPARAM)&search);
+	return search.taskbar;
 }
 
 static volatile LONG g_StartButtonActive = 0;
@@ -140,7 +131,6 @@ struct StartInputRoute
 {
 	InstanceHandle startHandle;
 	InstanceHandle rootHandle;
-	InstanceHandle sourceHandle;
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> startElement;
 	CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> startFramework;
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> rootElement;
@@ -156,7 +146,6 @@ struct StartInputRoute
 	{
 		startHandle = 0;
 		rootHandle = 0;
-		sourceHandle = 0;
 		verified = false;
 		pointerInside = false;
 		taskbar = NULL;
@@ -321,7 +310,6 @@ public:
 
 			EnterCriticalSection(&m_Lock);
 			m_Elements.clear();
-			m_XamlSources.clear();
 			m_PrimaryStart = 0;
 			m_NextDiscoveryOrder = 0;
 			LeaveCriticalSection(&m_Lock);
@@ -340,7 +328,6 @@ public:
 
 		EnterCriticalSection(&m_Lock);
 		m_Elements.clear();
-		m_XamlSources.clear();
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
 		LeaveCriticalSection(&m_Lock);
@@ -432,7 +419,6 @@ public:
 		EnterCriticalSection(&m_Lock);
 		if (mutationType == Remove)
 		{
-			m_XamlSources.erase(element.Handle);
 			auto it = m_Elements.find(element.Handle);
 			if (it != m_Elements.end())
 			{
@@ -465,12 +451,9 @@ public:
 				record.discoveryOrder = ++m_NextDiscoveryOrder;
 			}
 			m_Elements[element.Handle] = record;
-			const bool isXamlSource = record.type == L"Windows.UI.Xaml.Hosting.DesktopWindowXamlSource";
 			const bool isStartCandidate = IsStartControlCandidate(record);
-			if (isXamlSource)
-				m_XamlSources.insert(element.Handle);
 
-			routeTopologyChanged = isXamlSource || isStartCandidate;
+			routeTopologyChanged = isStartCandidate;
 			interesting = routeTopologyChanged || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
@@ -590,9 +573,10 @@ public:
 			return S_OK;
 		}
 
-		HWND taskbar = route->taskbar;
+		HWND taskbar = FindTaskbarAtPoint(screenPoint);
 		if (!taskbar || !IsWindow(taskbar))
 		{
+			LogToFile(STARTUP_LOG, L"Win11StartInput: no taskbar at pointer position %d,%d", screenPoint.x, screenPoint.y);
 			InvalidateInputRoute(*route);
 			return S_OK;
 		}
@@ -765,8 +749,7 @@ private:
 	{
 		for (size_t i = 0; i < m_InputRoutes.size(); i++)
 			if (m_InputRoutes[i].startHandle == handle ||
-				m_InputRoutes[i].rootHandle == handle ||
-				m_InputRoutes[i].sourceHandle == handle)
+				m_InputRoutes[i].rootHandle == handle)
 				return true;
 		return false;
 	}
@@ -880,62 +863,6 @@ private:
 		return false;
 	}
 
-	HWND ResolveInputTaskbar(
-		ABI::Windows::UI::Xaml::IUIElement *rootElement, InstanceHandle *sourceHandle )
-	{
-		if (sourceHandle)
-			*sourceHandle = 0;
-		if (!m_Diagnostics || !rootElement)
-			return NULL;
-
-		CComPtr<IUnknown> rootIdentity;
-		if (FAILED(rootElement->QueryInterface(IID_PPV_ARGS(&rootIdentity))) || !rootIdentity)
-			return NULL;
-
-		std::vector<InstanceHandle> sources;
-		EnterCriticalSection(&m_Lock);
-		for (auto it = m_XamlSources.begin(); it != m_XamlSources.end(); ++it)
-			sources.push_back(*it);
-		LeaveCriticalSection(&m_Lock);
-
-		for (size_t i = 0; i < sources.size(); i++)
-		{
-			CComPtr<IInspectable> inspectable;
-			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(sources[i], &inspectable)) || !inspectable)
-				continue;
-
-			CComPtr<IOpenShellDesktopWindowXamlSource> source;
-			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&source))) || !source)
-				continue;
-
-			CComPtr<ABI::Windows::UI::Xaml::IUIElement> content;
-			if (FAILED(source->get_Content(&content)) || !content)
-				continue;
-
-			CComPtr<IUnknown> contentIdentity;
-			if (FAILED(content->QueryInterface(IID_PPV_ARGS(&contentIdentity))) ||
-				contentIdentity != rootIdentity)
-				continue;
-
-			CComPtr<IOpenShellDesktopWindowXamlSourceNative> nativeSource;
-			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&nativeSource))) || !nativeSource)
-				continue;
-
-			HWND xamlHwnd = NULL;
-			if (FAILED(nativeSource->get_WindowHandle(&xamlHwnd)) || !xamlHwnd)
-				continue;
-
-			HWND taskbar = FindTaskbarAncestor(xamlHwnd);
-			if (taskbar)
-			{
-				if (sourceHandle)
-					*sourceHandle = sources[i];
-				return taskbar;
-			}
-		}
-		return NULL;
-	}
-
 	bool AttachInputRoute( InstanceHandle startHandle )
 	{
 		if (FindInputRoute(startHandle))
@@ -957,13 +884,6 @@ private:
 			return false;
 		if (!GetInputRoot(startHandle, &route.rootHandle, route.rootElement))
 			return false;
-		route.taskbar = ResolveInputTaskbar(route.rootElement, &route.sourceHandle);
-		if (!route.taskbar)
-		{
-			LogToFile(STARTUP_LOG, L"Win11StartInput: unable to resolve taskbar HWND for handle %llu; keeping WH_MOUSE fallback",
-				(unsigned long long)startHandle);
-			return false;
-		}
 
 		auto handler = Microsoft::WRL::Make<CStartPointerHandler>(this, startHandle);
 		if (!handler)
@@ -993,9 +913,8 @@ private:
 		}
 
 		m_InputRoutes.push_back(route);
-		LogToFile(STARTUP_LOG, L"Win11StartInput: route attached for handle %llu via root %llu/source %llu",
-			(unsigned long long)startHandle, (unsigned long long)route.rootHandle,
-			(unsigned long long)route.sourceHandle);
+		LogToFile(STARTUP_LOG, L"Win11StartInput: route attached for handle %llu via root %llu",
+			(unsigned long long)startHandle, (unsigned long long)route.rootHandle);
 		return true;
 	}
 
@@ -1051,8 +970,7 @@ private:
 			{
 				EnterCriticalSection(&m_Lock);
 				keep = m_Elements.find(m_InputRoutes[i].startHandle) != m_Elements.end() &&
-					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end() &&
-					m_Elements.find(m_InputRoutes[i].sourceHandle) != m_Elements.end();
+					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end();
 				LeaveCriticalSection(&m_Lock);
 			}
 
@@ -1503,7 +1421,6 @@ private:
 	size_t m_ExpectedInputRoutes;
 	LONG m_LastInputState;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
-	std::unordered_set<InstanceHandle> m_XamlSources;
 	std::vector<StartInputRoute> m_InputRoutes;
 };
 
