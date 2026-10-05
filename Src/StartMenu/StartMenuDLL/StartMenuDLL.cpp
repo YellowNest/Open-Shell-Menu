@@ -458,6 +458,8 @@ static void DrainWin11StartMouseStateMessages( void )
 
 	MSG msg;
 	UINT message=GetWin11StartMouseStateMessage();
+	if (!message)
+		return;
 	while (PeekMessage(&msg,NULL,message,message,PM_REMOVE))
 	{
 	}
@@ -3714,7 +3716,8 @@ static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lPara
 	if (code==HC_ACTION && wParam)
 	{
 		MSG *msg=(MSG*)lParam;
-		if (IsWin11() && msg->message==GetWin11StartMouseStateMessage())
+		UINT startMouseStateMessage=IsWin11()?GetWin11StartMouseStateMessage():0;
+		if (startMouseStateMessage && msg->message==startMouseStateMessage)
 		{
 			SetWin11StartMouseState((LONG)msg->wParam);
 			msg->message=WM_NULL;
