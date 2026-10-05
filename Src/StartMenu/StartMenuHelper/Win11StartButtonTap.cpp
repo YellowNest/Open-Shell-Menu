@@ -25,6 +25,18 @@ static const GUID CLSID_OpenShellStartButtonTap =
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 
+enum
+{
+	WIN11_START_MOUSE_FALLBACK,
+	WIN11_START_MOUSE_XAML,
+};
+
+static UINT GetWin11StartMouseStateMessage( void )
+{
+	static UINT message = RegisterWindowMessage(L"OpenShell.Win11StartMouseState");
+	return message;
+}
+
 static volatile LONG g_StartButtonActive = 0;
 static volatile LONG g_StartButtonEnabled = 0;
 static volatile LONG g_AllTaskbars = 0;
@@ -99,6 +111,7 @@ public:
 		m_Dispatch = NULL;
 		m_PrimaryStart = 0;
 		m_NextDiscoveryOrder = 0;
+		m_LastMouseState = -1;
 		InitializeCriticalSection(&m_Lock);
 		_AtlModule.Lock();
 	}
@@ -269,6 +282,7 @@ public:
 		// VisualElement is an [in] parameter. The XAML diagnostics runtime owns
 		// the BSTR fields; copy the values we need but never free callback input.
 		bool interesting = false;
+		bool mouseTopologyChanged = false;
 
 		EnterCriticalSection(&m_Lock);
 		if (mutationType == Remove)
@@ -278,6 +292,8 @@ public:
 			{
 				interesting = it->second.visibilityOverride || it->second.hitTestOverride ||
 					it->second.isStartControl || IsStartControlCandidate(it->second);
+				mouseTopologyChanged = it->second.hitTestOverride || it->second.isStartControl ||
+					IsStartControlCandidate(it->second) || IsUnderStartButtonLocked(it->second.parent);
 				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
 				if (wasPrimary)
@@ -306,10 +322,18 @@ public:
 			}
 			m_Elements[element.Handle] = record;
 
-			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
+			mouseTopologyChanged = IsStartControlCandidate(record);
+			interesting = mouseTopologyChanged || IsStartGlyph(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
 		LeaveCriticalSection(&m_Lock);
+
+		// The mouse hook is process-thread wide. Re-arm it before the deferred
+		// ApplyState pass whenever the Start XAML topology may have changed.
+		// That avoids a window where a stale successful override has already
+		// caused WH_MOUSE to be removed while a new Start control is appearing.
+		if (mouseTopologyChanged)
+			ReportMouseHookState(WIN11_START_MOUSE_FALLBACK);
 
 		if (interesting)
 			RequestApply(false);
@@ -331,6 +355,11 @@ public:
 			PostMessage(m_Dispatch, WM_OS_STARTBUTTON_APPLY, 0, 0);
 	}
 
+	void ResetMouseHookState( void )
+	{
+		m_LastMouseState = -1;
+	}
+
 	HRESULT Deactivate( void )
 	{
 		// The diagnostics runtime retains this site beyond Open-Shell's lifetime.
@@ -343,6 +372,19 @@ public:
 	}
 
 private:
+	void ReportMouseHookState( LONG state )
+	{
+		if (m_LastMouseState == state)
+			return;
+
+		HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
+		if (taskbar && PostMessage(taskbar, GetWin11StartMouseStateMessage(), state, 0))
+		{
+			m_LastMouseState = state;
+			LogToFile(STARTUP_LOG, L"Win11StartButton: mouse routing state %d", state);
+		}
+	}
+
 	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 	{
 		CWin11StartButtonTap *tap = (CWin11StartButtonTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -694,6 +736,44 @@ private:
 				}
 			}
 		}
+
+		// HookDesktopThreadMouse only exists because the native XAML Start
+		// control consumes mouse input before the taskbar thread's normal
+		// WH_GETMESSAGE path can see it. Once every replacement-targeted Start
+		// control is confirmed non-hit-testable, the existing Open-Shell button
+		// HWND and HookDesktopThread can own mouse input without WH_MOUSE.
+		bool mouseReady = enabled;
+		size_t startControlCount = 0;
+		size_t targetCount = 0;
+		bool unresolvedCandidate = false;
+		EnterCriticalSection(&m_Lock);
+		InstanceHandle currentPrimary = m_PrimaryStart;
+		for (auto it = m_Elements.begin(); it != m_Elements.end(); ++it)
+		{
+			const StartElement &current = it->second;
+			if (IsStartControlCandidate(current) && !current.startControlResolved)
+				unresolvedCandidate = true;
+			if (!current.isStartControl)
+				continue;
+
+			startControlCount++;
+			bool target = allTaskbars || !currentPrimary || it->first == currentPrimary;
+			if (!target)
+				continue;
+			targetCount++;
+			if (!current.hitTestOverride)
+				mouseReady = false;
+		}
+		LeaveCriticalSection(&m_Lock);
+
+		// Keep the established fallback for the ambiguous multi-taskbar case
+		// where Open-Shell replaces only the primary Start button. Retiring a
+		// thread-wide hook is safe only when all native Start slots are replaced,
+		// or when there is just one Start control.
+		if (!targetCount || unresolvedCandidate || (!allTaskbars && startControlCount > 1))
+			mouseReady = false;
+
+		ReportMouseHookState(mouseReady ? WIN11_START_MOUSE_XAML : WIN11_START_MOUSE_FALLBACK);
 	}
 
 	LONG m_Refs;
@@ -704,6 +784,7 @@ private:
 	CComPtr<IVisualTreeService> m_Visual;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
+	LONG m_LastMouseState;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
@@ -888,6 +969,9 @@ extern "C" void StartWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
+		// StartMenuHelper can outlive StartMenuDLL. Force a fresh state message
+		// for each new DLL instance even if the XAML override is unchanged.
+		tap->ResetMouseHookState();
 		tap->RequestApply(false);
 		tap->Release();
 		return;
