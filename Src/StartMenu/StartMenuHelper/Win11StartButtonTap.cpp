@@ -869,12 +869,12 @@ static void EnsureConnection( void )
 	}
 }
 
-void StartWin11StartButtonMonitor( void )
+extern "C" void StartWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 {
-	if (!IsWin11())
-		return;
-
+	InterlockedExchange(&g_StartButtonEnabled, enabled ? 1 : 0);
+	InterlockedExchange(&g_AllTaskbars, allTaskbars ? 1 : 0);
 	InterlockedExchange(&g_StartButtonActive, 1);
+
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
@@ -882,13 +882,14 @@ void StartWin11StartButtonMonitor( void )
 		tap->Release();
 		return;
 	}
+
 	EnsureConnection();
 }
 
-void UpdateWin11StartButtonMonitor( void )
+extern "C" void UpdateWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 {
-	if (!IsWin11())
-		return;
+	InterlockedExchange(&g_StartButtonEnabled, enabled ? 1 : 0);
+	InterlockedExchange(&g_AllTaskbars, allTaskbars ? 1 : 0);
 
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
@@ -902,18 +903,16 @@ void UpdateWin11StartButtonMonitor( void )
 	}
 }
 
-void StopWin11StartButtonMonitor( void )
+extern "C" void StopWin11StartButtonTap( void )
 {
-	if (!IsWin11())
-		return;
-
 	InterlockedExchange(&g_StartButtonActive, 0);
+
 	CWin11StartButtonTap *tap = GetTapRef();
 	if (tap)
 	{
-		HRESULT hr = tap->Shutdown();
+		HRESULT hr = tap->Deactivate();
 		if (FAILED(hr))
-			LogToFile(STARTUP_LOG, L"Win11StartButton: TAP shutdown failed 0x%08X", hr);
+			LogToFile(STARTUP_LOG, L"Win11StartButtonTap: deactivate failed 0x%08X", hr);
 		tap->Release();
 	}
 }
