@@ -15,8 +15,11 @@
 #include <Windows.UI.Xaml.h>
 #include <xamlom.h>
 #include <ocidl.h>
+#include <UIAutomation.h>
 #include <unordered_map>
 #include <vector>
+
+#pragma comment(lib, "uiautomationcore.lib")
 
 static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
@@ -40,8 +43,10 @@ struct StartElement
 	InstanceHandle parent;
 	CString type;
 	CString name;
-	bool visibilityOverride;
+	bool iconOpacityOverride;
+	double originalOpacity;
 	bool hitTestOverride;
+	boolean originalHitTestVisible;
 	bool startControlResolved;
 	bool isStartControl;
 	unsigned int discoveryOrder;
@@ -49,8 +54,10 @@ struct StartElement
 	StartElement( void )
 	{
 		parent = 0;
-		visibilityOverride = false;
+		iconOpacityOverride = false;
+		originalOpacity = 1.0;
 		hitTestOverride = false;
+		originalHitTestVisible = true;
 		startControlResolved = false;
 		isStartControl = false;
 		discoveryOrder = 0;
@@ -73,17 +80,12 @@ static bool IsStartControlCandidate( const StartElement &element )
 	return element.name == L"LaunchListButton" || element.name == L"StartButton";
 }
 
-static bool IsStartGlyph( const StartElement &element )
+static bool IsStockStartIcon( const StartElement &element )
 {
-	if (element.name == L"Icon")
-		return true;
-	if (ContainsText(element.type, L"AnimatedVisualPlayer") || ContainsText(element.type, L"AepAnimatedIcon"))
-		return true;
-	if (ContainsText(element.type, L"FontIcon") || ContainsText(element.type, L"PathIcon") ||
-		ContainsText(element.type, L"ImageIcon") || ContainsText(element.type, L"BitmapIcon") ||
-		ContainsText(element.type, L"SymbolIcon"))
-		return true;
-	return false;
+	// Fail closed. Modern Windows 11 uses AnimatedVisualPlayer#Icon for the
+	// stock Start glyph. Do not hide arbitrary descendants named "Icon" because
+	// taskbar templates can change independently across Windows builds.
+	return element.name == L"Icon" && ContainsText(element.type, L"AnimatedVisualPlayer");
 }
 
 class CWin11StartButtonTap: public IObjectWithSite, public IVisualTreeServiceCallback2
@@ -155,6 +157,7 @@ public:
 			m_Advised = false;
 		}
 		m_Visual.Release();
+		m_Diagnostics.Release();
 		m_Site.Release();
 
 		if (!site)
@@ -191,10 +194,21 @@ public:
 			return S_OK;
 		}
 
-		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
+		HRESULT hr = site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&m_Diagnostics);
+		if (FAILED(hr) || !m_Diagnostics)
+		{
+			m_Diagnostics.Release();
+			m_Site.Release();
+			BalanceInjectionReference();
+			InterlockedExchange(&g_ConnectStarted, 0);
+			return hr;
+		}
+
+		hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&m_Visual);
 		if (FAILED(hr) || !m_Visual)
 		{
 			m_Visual.Release();
+			m_Diagnostics.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -205,6 +219,7 @@ public:
 		{
 			DWORD error = GetLastError();
 			m_Visual.Release();
+			m_Diagnostics.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -237,6 +252,7 @@ public:
 				DestroyWindow(dispatch);
 			}
 			m_Visual.Release();
+			m_Diagnostics.Release();
 			m_Site.Release();
 			BalanceInjectionReference();
 			InterlockedExchange(&g_ConnectStarted, 0);
@@ -265,7 +281,7 @@ public:
 			auto it = m_Elements.find(element.Handle);
 			if (it != m_Elements.end())
 			{
-				interesting = it->second.visibilityOverride || it->second.hitTestOverride ||
+				interesting = it->second.iconOpacityOverride || it->second.hitTestOverride ||
 					it->second.isStartControl || IsStartControlCandidate(it->second);
 				bool wasPrimary = element.Handle == m_PrimaryStart;
 				m_Elements.erase(it);
@@ -283,8 +299,10 @@ public:
 			auto previous = m_Elements.find(element.Handle);
 			if (previous != m_Elements.end())
 			{
-				record.visibilityOverride = previous->second.visibilityOverride;
+				record.iconOpacityOverride = previous->second.iconOpacityOverride;
+				record.originalOpacity = previous->second.originalOpacity;
 				record.hitTestOverride = previous->second.hitTestOverride;
+				record.originalHitTestVisible = previous->second.originalHitTestVisible;
 				record.startControlResolved = previous->second.startControlResolved;
 				record.isStartControl = previous->second.isStartControl;
 				record.discoveryOrder = previous->second.discoveryOrder;
@@ -295,7 +313,7 @@ public:
 			}
 			m_Elements[element.Handle] = record;
 
-			interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
+			interesting = IsStartControlCandidate(record) || IsStockStartIcon(record) ||
 				IsUnderStartButtonLocked(record.parent);
 		}
 		LeaveCriticalSection(&m_Lock);
@@ -382,6 +400,7 @@ private:
 		}
 
 		m_Visual.Release();
+		m_Diagnostics.Release();
 		m_Site.Release();
 
 		if (m_Dispatch)
@@ -570,75 +589,114 @@ private:
 		LeaveCriticalSection(&m_Lock);
 	}
 
-	HRESULT FindProperty( InstanceHandle handle, const wchar_t *name, unsigned int *index, CString *typeName )
+	HRESULT ResolveUIElement( InstanceHandle handle, CComPtr<ABI::Windows::UI::Xaml::IUIElement> &element )
 	{
-		unsigned int sourceCount = 0;
-		unsigned int valueCount = 0;
-		PropertyChainSource *sources = NULL;
-		PropertyChainValue *values = NULL;
-		HRESULT hr = m_Visual->GetPropertyValuesChain(handle, &sourceCount, &sources, &valueCount, &values);
-		if (FAILED(hr))
-		{
-			FreeProperties(sources, sourceCount, values, valueCount);
-			return hr;
-		}
+		if (!m_Diagnostics)
+			return E_NOINTERFACE;
 
-		bool found = false;
-		for (unsigned int i = 0; i < valueCount; i++)
-		{
-			if (!values[i].PropertyName || wcscmp(values[i].PropertyName, name) != 0)
-				continue;
-			if (values[i].MetadataBits & 0x2) // IsPropertyReadOnly
-				continue;
-
-			*index = values[i].Index;
-			if (typeName)
-				*typeName = values[i].Type ? values[i].Type : L"";
-			found = true;
-			break;
-		}
-		FreeProperties(sources, sourceCount, values, valueCount);
-		return found ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-	}
-
-	HRESULT SetPropertyText( InstanceHandle handle, const wchar_t *name, const wchar_t *valueText )
-	{
-		unsigned int index = 0;
-		CString typeName;
-		HRESULT hr = FindProperty(handle, name, &index, &typeName);
-		if (FAILED(hr) || typeName.IsEmpty())
+		CComPtr<IInspectable> inspectable;
+		HRESULT hr = m_Diagnostics->GetIInspectableFromHandle(handle, &inspectable);
+		if (FAILED(hr) || !inspectable)
 			return FAILED(hr) ? hr : E_FAIL;
 
-		CComBSTR type(typeName);
-		CComBSTR value(valueText);
-		InstanceHandle created = 0;
-		hr = m_Visual->CreateInstance(type, value, &created);
-		if (FAILED(hr))
-			return hr;
-		return m_Visual->SetProperty(handle, created, index);
+		return inspectable->QueryInterface(__uuidof(ABI::Windows::UI::Xaml::IUIElement),
+			(void**)&element);
 	}
 
-	HRESULT ClearPropertyByName( InstanceHandle handle, const wchar_t *name )
+	HRESULT SetStartControlHitTest( InstanceHandle handle, bool enabled )
 	{
-		unsigned int index = 0;
-		HRESULT hr = FindProperty(handle, name, &index, NULL);
+		CComPtr<ABI::Windows::UI::Xaml::IUIElement> element;
+		HRESULT hr = ResolveUIElement(handle, element);
 		if (FAILED(hr))
 			return hr;
-		return m_Visual->ClearProperty(handle, index);
-	}
 
-	void SetOverrideFlags( InstanceHandle handle, bool *visibility, bool *hitTest )
-	{
+		if (enabled)
+		{
+			boolean original = true;
+			hr = element->get_IsHitTestVisible(&original);
+			if (FAILED(hr))
+				return hr;
+
+			hr = element->put_IsHitTestVisible(false);
+			if (SUCCEEDED(hr))
+			{
+				EnterCriticalSection(&m_Lock);
+				auto it = m_Elements.find(handle);
+				if (it != m_Elements.end())
+				{
+					it->second.originalHitTestVisible = original;
+					it->second.hitTestOverride = true;
+				}
+				LeaveCriticalSection(&m_Lock);
+			}
+			return hr;
+		}
+
+		boolean original = true;
 		EnterCriticalSection(&m_Lock);
 		auto it = m_Elements.find(handle);
 		if (it != m_Elements.end())
-		{
-			if (visibility)
-				it->second.visibilityOverride = *visibility;
-			if (hitTest)
-				it->second.hitTestOverride = *hitTest;
-		}
+			original = it->second.originalHitTestVisible;
 		LeaveCriticalSection(&m_Lock);
+
+		hr = element->put_IsHitTestVisible(original);
+		if (SUCCEEDED(hr))
+		{
+			EnterCriticalSection(&m_Lock);
+			it = m_Elements.find(handle);
+			if (it != m_Elements.end())
+				it->second.hitTestOverride = false;
+			LeaveCriticalSection(&m_Lock);
+		}
+		return hr;
+	}
+
+	HRESULT SetStockIconOpacity( InstanceHandle handle, bool hidden )
+	{
+		CComPtr<ABI::Windows::UI::Xaml::IUIElement> element;
+		HRESULT hr = ResolveUIElement(handle, element);
+		if (FAILED(hr))
+			return hr;
+
+		if (hidden)
+		{
+			double original = 1.0;
+			hr = element->get_Opacity(&original);
+			if (FAILED(hr))
+				return hr;
+
+			hr = element->put_Opacity(0.0);
+			if (SUCCEEDED(hr))
+			{
+				EnterCriticalSection(&m_Lock);
+				auto it = m_Elements.find(handle);
+				if (it != m_Elements.end())
+				{
+					it->second.originalOpacity = original;
+					it->second.iconOpacityOverride = true;
+				}
+				LeaveCriticalSection(&m_Lock);
+			}
+			return hr;
+		}
+
+		double original = 1.0;
+		EnterCriticalSection(&m_Lock);
+		auto it = m_Elements.find(handle);
+		if (it != m_Elements.end())
+			original = it->second.originalOpacity;
+		LeaveCriticalSection(&m_Lock);
+
+		hr = element->put_Opacity(original);
+		if (SUCCEEDED(hr))
+		{
+			EnterCriticalSection(&m_Lock);
+			it = m_Elements.find(handle);
+			if (it != m_Elements.end())
+				it->second.iconOpacityOverride = false;
+			LeaveCriticalSection(&m_Lock);
+		}
+		return hr;
 	}
 
 	void ApplyState( bool enabled )
@@ -688,28 +746,16 @@ private:
 				if (enabled && target)
 				{
 					if (!record.hitTestOverride)
-					{
-						HRESULT hr = SetPropertyText(handle, L"IsHitTestVisible", L"False");
-						if (SUCCEEDED(hr))
-						{
-							bool value = true;
-							SetOverrideFlags(handle, NULL, &value);
-						}
-					}
+						SetStartControlHitTest(handle, true);
 				}
 				else if (record.hitTestOverride)
 				{
-					HRESULT hr = ClearPropertyByName(handle, L"IsHitTestVisible");
-					if (SUCCEEDED(hr))
-					{
-						bool value = false;
-						SetOverrideFlags(handle, NULL, &value);
-					}
+					SetStartControlHitTest(handle, false);
 				}
 				continue;
 			}
 
-			if (!IsStartGlyph(record))
+			if (!IsStockStartIcon(record))
 				continue;
 
 			InstanceHandle startAncestor = GetStartAncestor(handle);
@@ -719,24 +765,12 @@ private:
 
 			if (enabled && target)
 			{
-				if (!record.visibilityOverride)
-				{
-					HRESULT hr = SetPropertyText(handle, L"Visibility", L"Collapsed");
-					if (SUCCEEDED(hr))
-					{
-						bool value = true;
-						SetOverrideFlags(handle, &value, NULL);
-					}
-				}
+				if (!record.iconOpacityOverride)
+					SetStockIconOpacity(handle, true);
 			}
-			else if (record.visibilityOverride)
+			else if (record.iconOpacityOverride)
 			{
-				HRESULT hr = ClearPropertyByName(handle, L"Visibility");
-				if (SUCCEEDED(hr))
-				{
-					bool value = false;
-					SetOverrideFlags(handle, &value, NULL);
-				}
+				SetStockIconOpacity(handle, false);
 			}
 		}
 	}
@@ -747,6 +781,7 @@ private:
 	CRITICAL_SECTION m_Lock;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
+	CComPtr<IXamlDiagnostics> m_Diagnostics;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
 	bool m_InjectionReferenceBalanced;
