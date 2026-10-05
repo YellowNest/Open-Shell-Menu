@@ -118,6 +118,7 @@ struct StartInputRoute
 {
 	InstanceHandle startHandle;
 	InstanceHandle rootHandle;
+	InstanceHandle sourceHandle;
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> startElement;
 	CComPtr<ABI::Windows::UI::Xaml::IFrameworkElement> startFramework;
 	CComPtr<ABI::Windows::UI::Xaml::IUIElement> rootElement;
@@ -131,6 +132,7 @@ struct StartInputRoute
 	{
 		startHandle = 0;
 		rootHandle = 0;
+		sourceHandle = 0;
 		verified = false;
 		pointerInside = false;
 		taskbar = NULL;
@@ -636,7 +638,9 @@ private:
 	bool InputRouteUsesHandle( InstanceHandle handle ) const
 	{
 		for (size_t i = 0; i < m_InputRoutes.size(); i++)
-			if (m_InputRoutes[i].startHandle == handle || m_InputRoutes[i].rootHandle == handle)
+			if (m_InputRoutes[i].startHandle == handle ||
+				m_InputRoutes[i].rootHandle == handle ||
+				m_InputRoutes[i].sourceHandle == handle)
 				return true;
 		return false;
 	}
@@ -724,8 +728,10 @@ private:
 		return false;
 	}
 
-	HWND ResolveInputTaskbar( InstanceHandle startHandle )
+	HWND ResolveInputTaskbar( InstanceHandle startHandle, InstanceHandle *sourceHandle )
 	{
+		if (sourceHandle)
+			*sourceHandle = 0;
 		if (!m_Diagnostics)
 			return NULL;
 
@@ -759,7 +765,11 @@ private:
 
 			HWND taskbar = FindTaskbarAncestor(xamlHwnd);
 			if (taskbar)
+			{
+				if (sourceHandle)
+					*sourceHandle = *it2;
 				return taskbar;
+			}
 		}
 		return NULL;
 	}
@@ -785,7 +795,7 @@ private:
 			return false;
 		if (!GetInputRoot(startHandle, &route.rootHandle, route.rootElement))
 			return false;
-		route.taskbar = ResolveInputTaskbar(startHandle);
+		route.taskbar = ResolveInputTaskbar(startHandle, &route.sourceHandle);
 		if (!route.taskbar)
 		{
 			LogToFile(STARTUP_LOG, L"Win11StartInput: unable to resolve taskbar HWND for handle %llu; keeping WH_MOUSE fallback",
@@ -822,8 +832,9 @@ private:
 		}
 
 		m_InputRoutes.push_back(route);
-		LogToFile(STARTUP_LOG, L"Win11StartInput: route attached for handle %llu via root %llu",
-			(unsigned long long)startHandle, (unsigned long long)route.rootHandle);
+		LogToFile(STARTUP_LOG, L"Win11StartInput: route attached for handle %llu via root %llu/source %llu",
+			(unsigned long long)startHandle, (unsigned long long)route.rootHandle,
+			(unsigned long long)route.sourceHandle);
 		return true;
 	}
 
@@ -879,7 +890,8 @@ private:
 			{
 				EnterCriticalSection(&m_Lock);
 				keep = m_Elements.find(m_InputRoutes[i].startHandle) != m_Elements.end() &&
-					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end();
+					m_Elements.find(m_InputRoutes[i].rootHandle) != m_Elements.end() &&
+					m_Elements.find(m_InputRoutes[i].sourceHandle) != m_Elements.end();
 				LeaveCriticalSection(&m_Lock);
 			}
 
