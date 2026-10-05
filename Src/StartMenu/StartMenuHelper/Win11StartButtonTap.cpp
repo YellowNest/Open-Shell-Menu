@@ -887,9 +887,13 @@ private:
 		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
+			// GWLP_USERDATA is a raw pointer. Hold the TAP alive while ApplyState
+			// may detach the last routed-event handler that also references it.
+			tap->AddRef();
 			bool enabled = InterlockedCompareExchange(&g_StartButtonActive, 0, 0) != 0 &&
 				InterlockedCompareExchange(&g_StartButtonEnabled, 0, 0) != 0;
 			tap->ApplyState(enabled);
+			tap->Release();
 			return 0;
 		}
 		return DefWindowProc(hwnd, msg, wParam, lParam);
