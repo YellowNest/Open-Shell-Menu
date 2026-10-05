@@ -636,8 +636,16 @@ private:
 	{
 		if (!taskbar || !IsWindow(taskbar))
 			return false;
-		return PostMessage(taskbar, GetWin11StartInputMessage(), mouseMessage,
-			MAKELPARAM(screenPoint.x, screenPoint.y)) != FALSE;
+
+		LPARAM position = 0;
+		if (mouseMessage != WM_MOUSELEAVE)
+		{
+			POINT taskbarPoint = screenPoint;
+			if (!ScreenToClient(taskbar, &taskbarPoint))
+				return false;
+			position = MAKELPARAM(taskbarPoint.x, taskbarPoint.y);
+		}
+		return PostMessage(taskbar, GetWin11StartInputMessage(), mouseMessage, position) != FALSE;
 	}
 
 	void ReprobeInputBridgeState( void )
