@@ -17,7 +17,6 @@
 #include <Windows.UI.Xaml.h>
 #include <Windows.UI.Xaml.Input.h>
 #include <Windows.UI.Input.h>
-#include <windows.ui.xaml.hosting.desktopwindowxamlsource.h>
 #include <xamlom.h>
 #include <ocidl.h>
 #include <roapi.h>
@@ -30,6 +29,18 @@
 
 static const GUID CLSID_OpenShellStartButtonTap =
 { 0x7d15741f, 0x2f3b, 0x4971, { 0xb8, 0x91, 0x6a, 0x5d, 0x42, 0xd7, 0x1a, 0x34 } };
+
+// windows.ui.xaml.hosting.desktopwindowxamlsource.h exposes this interface
+// through projection-specific declarations that do not compose cleanly with
+// this ATL project. Keep the documented COM ABI local instead of pulling a
+// second WinRT projection into StartMenuHelper.
+MIDL_INTERFACE("3cbcf1bf-2f76-4e9c-96ab-e84b37972554")
+IOpenShellDesktopWindowXamlSourceNative : public IUnknown
+{
+public:
+	virtual HRESULT STDMETHODCALLTYPE AttachToWindow( HWND parentWnd ) = 0;
+	virtual HRESULT STDMETHODCALLTYPE get_WindowHandle( HWND *hWnd ) = 0;
+};
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 
@@ -755,7 +766,7 @@ private:
 			if (FAILED(m_Diagnostics->GetIInspectableFromHandle(*it2, &inspectable)) || !inspectable)
 				continue;
 
-			CComPtr<IDesktopWindowXamlSourceNative> xamlSource;
+			CComPtr<IOpenShellDesktopWindowXamlSourceNative> xamlSource;
 			if (FAILED(inspectable->QueryInterface(IID_PPV_ARGS(&xamlSource))) || !xamlSource)
 				continue;
 
