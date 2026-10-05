@@ -357,7 +357,7 @@ public:
 
 	void ResetMouseHookState( void )
 	{
-		m_LastMouseState = -1;
+		InterlockedExchange(&m_LastMouseState, -1);
 	}
 
 	HRESULT Deactivate( void )
@@ -374,13 +374,13 @@ public:
 private:
 	void ReportMouseHookState( LONG state )
 	{
-		if (m_LastMouseState == state)
+		if (InterlockedCompareExchange(&m_LastMouseState, 0, 0) == state)
 			return;
 
 		HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
 		if (taskbar && PostMessage(taskbar, GetWin11StartMouseStateMessage(), state, 0))
 		{
-			m_LastMouseState = state;
+			InterlockedExchange(&m_LastMouseState, state);
 			LogToFile(STARTUP_LOG, L"Win11StartButton: mouse routing state %d", state);
 		}
 	}
@@ -784,7 +784,7 @@ private:
 	CComPtr<IVisualTreeService> m_Visual;
 	InstanceHandle m_PrimaryStart;
 	unsigned int m_NextDiscoveryOrder;
-	LONG m_LastMouseState;
+	volatile LONG m_LastMouseState;
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
