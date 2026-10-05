@@ -43,7 +43,10 @@
     <ClCompile Include="ModernSettingsContextMenu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
+      <ClCompile Include="Win11StartButtonTap.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+</ItemGroup>
   <ItemGroup>
     <Midl Include="StartMenuHelper.idl">
       <Filter>Source Files</Filter>
@@ -100,7 +103,10 @@
     <ClInclude Include="ModernSettingsContextMenu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  </ItemGroup>
+      <ClInclude Include="Win11StartButtonTap.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+</ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="StartMenuHelper.rc">
       <Filter>Resource Files</Filter>
