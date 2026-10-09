@@ -866,10 +866,11 @@ private:
 		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
-			// A queued enable request must never re-apply overrides once teardown
-			// has started, even if Open-Shell is replacing the diagnostics site.
-			bool enabled = wParam != 0 && tap->m_AllowEnable &&
-				g_StartButtonActive && g_StartButtonEnabled;
+			// The synchronous restore is the only tree mutation permitted
+			// after shutdown begins. Late posts must not access m_Visual.
+			if (!tap->m_AllowEnable)
+				return S_OK;
+			bool enabled = wParam != 0 && g_StartButtonActive && g_StartButtonEnabled;
 			return static_cast<LRESULT>(tap->m_StartTree.ApplyState(enabled));
 		}
 		return DefWindowProc(hwnd, msg, wParam, lParam);
