@@ -22,6 +22,7 @@ jobs:
           $os=Get-CimInstance Win32_OperatingSystem
           Add-Type -TypeDefinition @'
           using System;
+          using System.Text;
           using System.Runtime.InteropServices;
           [StructLayout(LayoutKind.Sequential)] public struct RECT {public int Left,Top,Right,Bottom;}
           [StructLayout(LayoutKind.Sequential)] public struct POINT {public int X,Y;}
@@ -33,6 +34,8 @@ jobs:
             [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
             [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd,uint flag);
             [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd,StringBuilder buffer,int maxCount);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
           }
           '@
           $bar=[ShellHWND]::FindWindow('Shell_TrayWnd',$null)
@@ -45,6 +48,14 @@ jobs:
           $hit=[ShellHWND]::WindowFromPoint($point)
           $hitRoot=[ShellHWND]::GetAncestor($hit,2)
           $visible=[ShellHWND]::IsWindowVisible($bar)
+          $hitClass=New-Object System.Text.StringBuilder(256)
+          $discard=[ShellHWND]::GetClassName($hitRoot,$hitClass,256)
+          $ownerPid=[uint32]0
+          $discard=[ShellHWND]::GetWindowThreadProcessId($hitRoot,[ref]$ownerPid)
+          $rootRect=New-Object RECT
+          $discard=[ShellHWND]::GetWindowRect($hitRoot,[ref]$rootRect)
+          $ownerName=''
+          try{$ownerName=(Get-Process -Id $ownerPid).ProcessName}catch{$ownerName='unavailable'}
           Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
           $element=[System.Windows.Automation.AutomationElement]::FromHandle($bar)
           $condition=[System.Windows.Automation.PropertyCondition]::new(
@@ -77,6 +88,8 @@ jobs:
             HitPoint=@{X=$point.X;Y=$point.Y}
             HitWindow=[string]$hit;HitRoot=[string]$hitRoot
             TaskbarIsTopmostAtHitPoint=($hitRoot -eq $bar)
+            HitRootClass=$hitClass.ToString();HitRootPID=$ownerPid;HitRootProcess=$ownerName
+            HitRootRect=@{Left=$rootRect.Left;Top=$rootRect.Top;Right=$rootRect.Right;Bottom=$rootRect.Bottom}
             ForegroundWindow=[string][ShellHWND]::GetForegroundWindow()
             StartButtonAutomationCount=$found.Count;Elements=$items
             TotalDescendants=$all.Count;Sample=$sample
