@@ -23,13 +23,28 @@ jobs:
           Add-Type -TypeDefinition @'
           using System;
           using System.Runtime.InteropServices;
+          [StructLayout(LayoutKind.Sequential)] public struct RECT {public int Left,Top,Right,Bottom;}
+          [StructLayout(LayoutKind.Sequential)] public struct POINT {public int X,Y;}
           public static class ShellHWND {
             [DllImport("user32.dll", CharSet=CharSet.Unicode)]
             public static extern IntPtr FindWindow(string className,string name);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd,out RECT rect);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+            [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
+            [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd,uint flag);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
           }
           '@
           $bar=[ShellHWND]::FindWindow('Shell_TrayWnd',$null)
           if($bar -eq [IntPtr]::Zero) {throw 'No interactive taskbar'}
+          $rect=New-Object RECT
+          if(-not [ShellHWND]::GetWindowRect($bar,[ref]$rect)){throw 'Could not read taskbar rectangle'}
+          $point=New-Object POINT
+          $point.X=[int](($rect.Left+$rect.Right)/2)
+          $point.Y=[int](($rect.Top+$rect.Bottom)/2)
+          $hit=[ShellHWND]::WindowFromPoint($point)
+          $hitRoot=[ShellHWND]::GetAncestor($hit,2)
+          $visible=[ShellHWND]::IsWindowVisible($bar)
           Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
           $element=[System.Windows.Automation.AutomationElement]::FromHandle($bar)
           $condition=[System.Windows.Automation.PropertyCondition]::new(
@@ -57,6 +72,12 @@ jobs:
             OS=$os.Caption;Build=$os.BuildNumber;TaskbarHWND=[string]$bar
             CurrentSession=([Diagnostics.Process]::GetCurrentProcess().SessionId)
             ExplorerProcesses=@(Get-Process explorer|ForEach-Object{@{PID=$_.Id;Session=$_.SessionId}})
+            TaskbarVisible=$visible
+            TaskbarRect=@{Left=$rect.Left;Top=$rect.Top;Right=$rect.Right;Bottom=$rect.Bottom}
+            HitPoint=@{X=$point.X;Y=$point.Y}
+            HitWindow=[string]$hit;HitRoot=[string]$hitRoot
+            TaskbarIsTopmostAtHitPoint=($hitRoot -eq $bar)
+            ForegroundWindow=[string][ShellHWND]::GetForegroundWindow()
             StartButtonAutomationCount=$found.Count;Elements=$items
             TotalDescendants=$all.Count;Sample=$sample
           } | ConvertTo-Json -Depth 9 | Write-Host
