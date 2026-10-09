@@ -1,0 +1,50 @@
+name: Probe native Windows 11 taskbar UI Automation IDs
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-uia-probe.yml'
+
+jobs:
+  start-button-uia:
+    runs-on: windows-11-arm
+    timeout-minutes: 6
+    steps:
+      - name: Check OS, desktop and real Start button accessibility tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $os=Get-CimInstance Win32_OperatingSystem
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class ShellHWND {
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+            public static extern IntPtr FindWindow(string className,string name);
+          }
+          '@
+          $bar=[ShellHWND]::FindWindow('Shell_TrayWnd',$null)
+          if($bar -eq [IntPtr]::Zero) {throw 'No interactive taskbar'}
+          Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+          $element=[System.Windows.Automation.AutomationElement]::FromHandle($bar)
+          $condition=[System.Windows.Automation.PropertyCondition]::new(
+             [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+             'StartButton')
+          $found=$element.FindAll([System.Windows.Automation.TreeScope]::Descendants,$condition)
+          $items=@()
+          foreach($x in $found){
+            $r=$x.Current.BoundingRectangle
+            $items+=@{Name=$x.Current.Name;Id=$x.Current.AutomationId;IsOffscreen=$x.Current.IsOffscreen;IsEnabled=$x.Current.IsEnabled;X=$r.X;Y=$r.Y;Width=$r.Width;Height=$r.Height}
+          }
+          [ordered]@{
+            OS=$os.Caption;Build=$os.BuildNumber;TaskbarHWND=[string]$bar
+            CurrentSession=([Diagnostics.Process]::GetCurrentProcess().SessionId)
+            ExplorerProcesses=@(Get-Process explorer|ForEach-Object{@{PID=$_.Id;Session=$_.SessionId}})
+            StartButtonAutomationCount=$found.Count;Elements=$items
+          } | ConvertTo-Json -Depth 7 | Write-Host
+          Write-Host 'PASS: UI Automation interrogated native Windows 11 taskbar without application injection'
