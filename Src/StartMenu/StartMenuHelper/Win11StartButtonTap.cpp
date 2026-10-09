@@ -162,6 +162,111 @@ public:
 	}
 
 
+	HRESULT ApplyState( bool enabled )
+	{
+		if (!m_Visual)
+			return E_UNEXPECTED;
+
+		HRESULT firstError = S_OK;
+		std::vector<std::pair<InstanceHandle, StartElement>> elements;
+		{
+			std::lock_guard lock(m_Mutex);
+			elements.reserve(m_Elements.size());
+			for (const auto &element : m_Elements)
+				elements.push_back(element);
+		}
+
+		// Classification is only needed when applying overrides. During teardown,
+		// use the classifications that produced the existing overrides; querying
+		// new candidates adds risk and work without helping restoration.
+		if (enabled)
+		{
+			for (size_t i = 0; i < elements.size(); i++)
+			{
+				StartElement &record = elements[i].second;
+				if (!IsStartControlCandidate(record) || record.startControlResolved)
+					continue;
+
+				bool isStartControl = false;
+				HRESULT hr = ResolveStartControl(elements[i].first, record, &isStartControl);
+				if (SUCCEEDED(hr))
+				{
+					record.startControlResolved = true;
+					record.isStartControl = isStartControl;
+					SetControlClassification(elements[i].first, isStartControl);
+				}
+				else if (SUCCEEDED(firstError))
+				{
+					firstError = hr;
+				}
+			}
+		}
+
+		InstanceHandle primaryStart = 0;
+		{
+			std::lock_guard lock(m_Mutex);
+			primaryStart = m_PrimaryStart;
+		}
+
+		const bool allTaskbars = g_AllTaskbars;
+
+		// Both properties share the same set/restore behavior.
+		auto applyOverride = [&](InstanceHandle handle, const wchar_t *property, const wchar_t *value,
+			bool shouldOverride, bool hasOverride, bool visibility)
+		{
+			if (shouldOverride == hasOverride)
+				return;
+			HRESULT hr = shouldOverride ? SetPropertyText(handle, property, value) :
+				ClearPropertyByName(handle, property);
+			if (SUCCEEDED(hr))
+			{
+				bool updated = shouldOverride;
+				if (visibility)
+					SetOverrideFlags(handle, &updated, NULL);
+				else
+					SetOverrideFlags(handle, NULL, &updated);
+			}
+			else if (SUCCEEDED(firstError))
+				firstError = hr;
+		};
+
+		for (size_t i = 0; i < elements.size(); i++)
+		{
+			InstanceHandle handle = elements[i].first;
+			StartElement record = elements[i].second;
+
+			// Restoration depends on what we changed, not on whether a
+			// dynamically rebuilt XAML tree still has the same ancestry.
+			if (!enabled)
+			{
+				if (record.hitTestOverride)
+					applyOverride(handle, L"IsHitTestVisible", L"False", false, true, false);
+				if (record.visibilityOverride)
+					applyOverride(handle, L"Visibility", L"Collapsed", false, true, true);
+				continue;
+			}
+			if (record.isStartControl)
+			{
+				bool target = allTaskbars || !primaryStart || handle == primaryStart;
+				applyOverride(handle, L"IsHitTestVisible", L"False",
+					enabled && target, record.hitTestOverride, false);
+				continue;
+			}
+
+			if (!IsStartGlyph(record))
+				continue;
+			InstanceHandle startAncestor = GetStartAncestor(handle);
+			if (!startAncestor)
+				continue;
+			bool target = allTaskbars || !primaryStart || startAncestor == primaryStart;
+			applyOverride(handle, L"Visibility", L"Collapsed",
+				enabled && target, record.visibilityOverride, true);
+		}
+
+		return firstError;
+	}
+
+
 private:
 	InstanceHandle FindStartAncestorLocked( InstanceHandle parent ) const
 	{
@@ -353,112 +458,6 @@ private:
 				it->second.hitTestOverride = *hitTest;
 		}
 	}
-
-	public:
-	HRESULT ApplyState( bool enabled )
-	{
-		if (!m_Visual)
-			return E_UNEXPECTED;
-
-		HRESULT firstError = S_OK;
-		std::vector<std::pair<InstanceHandle, StartElement>> elements;
-		{
-			std::lock_guard lock(m_Mutex);
-			elements.reserve(m_Elements.size());
-			for (const auto &element : m_Elements)
-				elements.push_back(element);
-		}
-
-		// Classification is only needed when applying overrides. During teardown,
-		// use the classifications that produced the existing overrides; querying
-		// new candidates adds risk and work without helping restoration.
-		if (enabled)
-		{
-			for (size_t i = 0; i < elements.size(); i++)
-			{
-				StartElement &record = elements[i].second;
-				if (!IsStartControlCandidate(record) || record.startControlResolved)
-					continue;
-
-				bool isStartControl = false;
-				HRESULT hr = ResolveStartControl(elements[i].first, record, &isStartControl);
-				if (SUCCEEDED(hr))
-				{
-					record.startControlResolved = true;
-					record.isStartControl = isStartControl;
-					SetControlClassification(elements[i].first, isStartControl);
-				}
-				else if (SUCCEEDED(firstError))
-				{
-					firstError = hr;
-				}
-			}
-		}
-
-		InstanceHandle primaryStart = 0;
-		{
-			std::lock_guard lock(m_Mutex);
-			primaryStart = m_PrimaryStart;
-		}
-
-		const bool allTaskbars = g_AllTaskbars;
-
-		// Both properties share the same set/restore behavior.
-		auto applyOverride = [&](InstanceHandle handle, const wchar_t *property, const wchar_t *value,
-			bool shouldOverride, bool hasOverride, bool visibility)
-		{
-			if (shouldOverride == hasOverride)
-				return;
-			HRESULT hr = shouldOverride ? SetPropertyText(handle, property, value) :
-				ClearPropertyByName(handle, property);
-			if (SUCCEEDED(hr))
-			{
-				bool updated = shouldOverride;
-				if (visibility)
-					SetOverrideFlags(handle, &updated, NULL);
-				else
-					SetOverrideFlags(handle, NULL, &updated);
-			}
-			else if (SUCCEEDED(firstError))
-				firstError = hr;
-		};
-
-		for (size_t i = 0; i < elements.size(); i++)
-		{
-			InstanceHandle handle = elements[i].first;
-			StartElement record = elements[i].second;
-
-			// Restoration depends on what we changed, not on whether a
-			// dynamically rebuilt XAML tree still has the same ancestry.
-			if (!enabled)
-			{
-				if (record.hitTestOverride)
-					applyOverride(handle, L"IsHitTestVisible", L"False", false, true, false);
-				if (record.visibilityOverride)
-					applyOverride(handle, L"Visibility", L"Collapsed", false, true, true);
-				continue;
-			}
-			if (record.isStartControl)
-			{
-				bool target = allTaskbars || !primaryStart || handle == primaryStart;
-				applyOverride(handle, L"IsHitTestVisible", L"False",
-					enabled && target, record.hitTestOverride, false);
-				continue;
-			}
-
-			if (!IsStartGlyph(record))
-				continue;
-			InstanceHandle startAncestor = GetStartAncestor(handle);
-			if (!startAncestor)
-				continue;
-			bool target = allTaskbars || !primaryStart || startAncestor == primaryStart;
-			applyOverride(handle, L"Visibility", L"Collapsed",
-				enabled && target, record.visibilityOverride, true);
-		}
-
-		return firstError;
-	}
-
 
 	CComPtr<IVisualTreeService> m_Visual;
 	std::mutex m_Mutex;
