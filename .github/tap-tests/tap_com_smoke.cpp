@@ -43,9 +43,11 @@ int wmain(int argc, wchar_t* argv[])
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!library) return fail(L"LoadLibraryEx", HRESULT_FROM_WIN32(GetLastError()));
 
-    auto getFactory = reinterpret_cast<decltype(&DllGetClassObject)>(
+    using GetFactoryFn = HRESULT (STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
+    using CanUnloadFn = HRESULT (STDAPICALLTYPE*)();
+    auto getFactory = reinterpret_cast<GetFactoryFn>(
         GetProcAddress(library, "DllGetClassObject"));
-    auto canUnload = reinterpret_cast<decltype(&DllCanUnloadNow)>(
+    auto canUnload = reinterpret_cast<CanUnloadFn>(
         GetProcAddress(library, "DllCanUnloadNow"));
     if (!getFactory || !canUnload) return fail(L"missing standard COM exports", E_FAIL);
 
