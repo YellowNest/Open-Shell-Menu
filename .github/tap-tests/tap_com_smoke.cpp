@@ -39,6 +39,8 @@ static int fail(const wchar_t* what, HRESULT hr)
 int wmain(int argc, wchar_t* argv[])
 {
     if (argc != 2) return fail(L"expected absolute DLL path", E_INVALIDARG);
+    HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(init)) return fail(L"CoInitializeEx", init);
     HMODULE library = LoadLibraryExW(argv[1], nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!library) return fail(L"LoadLibraryEx", HRESULT_FROM_WIN32(GetLastError()));
@@ -97,6 +99,7 @@ int wmain(int argc, wchar_t* argv[])
     hr = canUnload();
     if (hr != S_OK) return fail(L"DllCanUnloadNow should report no active TAP", hr);
     FreeLibrary(library);
+    CoUninitialize();
     std::wcout << L"PASS: 40 Create/SetSite(nullptr)/destroy cycles, "
                   L"invalid site, unsupported interface, COM unload eligibility" << std::endl;
     return 0;
