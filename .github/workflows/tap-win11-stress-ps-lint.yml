@@ -9,6 +9,7 @@ on:
       - review/tap-win11-arm-probe-20261009
     paths:
       - '.github/workflows/tap-win11-stress-ps-lint.yml'
+      - '.github/tap-tests/win11_native_x64_stress.ps1'
 
 jobs:
   powershell-parse:
