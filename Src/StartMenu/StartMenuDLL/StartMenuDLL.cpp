@@ -2644,7 +2644,9 @@ void UpdateTaskBars( TUpdateTaskbar update )
 		InvalidateRect(taskBar.taskBar,NULL,TRUE);
 		PostMessage(taskBar.taskBar,WM_THEMECHANGED,0,0);
 	}
-	UpdateWin11StartButtonMonitor();
+	// Cleanup has already closed settings; it must not reinitialize the TAP.
+	if (update != TASKBAR_CLEAR)
+		UpdateWin11StartButtonMonitor();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3291,8 +3293,6 @@ static DWORD WINAPI ExitThreadProc( void *param )
 
 static void CleanStartMenuDLL( void )
 {
-	StopWin11StartButtonMonitor();
-
 	ClearIatHook(g_DwmpBTRHook);
 	g_DwmpBTRHook=NULL;
 	ClearIatHook(g_DwmpTWWRHook);
@@ -3345,6 +3345,8 @@ static void CleanStartMenuDLL( void )
 	}
 	ResetHotCorners();
 	UpdateTaskBars(TASKBAR_CLEAR);
+	// Restore the native button after removing our taskbar replacements.
+	StopWin11StartButtonMonitor();
 	g_WinStartButton=NULL;
 	for (id_taskbar_map::const_iterator it=g_TaskbarInfos.begin();it!=g_TaskbarInfos.end();++it)
 	{
