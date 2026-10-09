@@ -612,6 +612,7 @@ public:
 		}
 		catch (...)
 		{
+			m_CallbackFailed = true;
 			m_AllowEnable = false;
 		}
 		return S_OK;
@@ -677,6 +678,8 @@ private:
 
 	HRESULT ActivateLocked( void )
 	{
+		if (m_CallbackFailed)
+			return E_FAIL;
 		if (!m_Visual)
 			return E_UNEXPECTED;
 		if (FAILED(m_DispatchStatus))
@@ -696,6 +699,10 @@ private:
 				return hr;
 			}
 			m_Advised = true;
+			// An exception during the synchronous tree replay leaves only a
+			// partial tree. Refuse to apply overrides from that state.
+			if (m_CallbackFailed)
+				return E_FAIL;
 		}
 
 		m_AllowEnable = true;
@@ -916,6 +923,7 @@ private:
 	HRESULT m_DispatchStatus = E_UNEXPECTED;
 	std::atomic_bool m_Advised{ false };
 	std::atomic_bool m_AllowEnable{ false };
+	std::atomic_bool m_CallbackFailed{ false };
 	std::atomic_bool m_Deactivating{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
 	std::mutex m_LifecycleMutex;
