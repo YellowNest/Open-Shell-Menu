@@ -140,7 +140,7 @@ public:
 		// A diagnostics TAP has a single site. Exit unregisters its callback,
 		// rather than trying to re-site the existing instance.
 		if (!site)
-			return S_OK;
+			return Deactivate();
 
 		std::lock_guard lifecycleLock(m_LifecycleMutex);
 		if (m_Site)
@@ -277,7 +277,7 @@ public:
 			if (SUCCEEDED(hr))
 			{
 				std::unique_lock tapLock(g_TapMutex);
-				if (!g_StartButtonActive && g_Tap.p == this)
+				if (g_Tap.p == this)
 				{
 					releasedTap.Attach(g_Tap.Detach());
 					g_ConnectStarted = false;
@@ -362,6 +362,9 @@ private:
 
 	HRESULT DeactivateLocked( void )
 	{
+		if (!m_Visual)
+			return S_OK;
+
 		// First reject queued enable work. The dispatch thread drains queued
 		// messages and restores native properties before we unsubscribe.
 		m_AllowEnable = false;
