@@ -41,10 +41,23 @@ jobs:
             $r=$x.Current.BoundingRectangle
             $items+=@{Name=$x.Current.Name;Id=$x.Current.AutomationId;IsOffscreen=$x.Current.IsOffscreen;IsEnabled=$x.Current.IsEnabled;X=$r.X;Y=$r.Y;Width=$r.Width;Height=$r.Height}
           }
+          $all=$element.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition)
+          $sample=@()
+          $limit=[Math]::Min($all.Count,180)
+          for($n=0;$n -lt $limit;$n++){
+            try {
+              $x=$all.Item($n)
+              $sample+=@{Name=$x.Current.Name;AutomationId=$x.Current.AutomationId;
+                Class=$x.Current.ClassName;ControlType=$x.Current.ControlType.ProgrammaticName;
+                IsOffscreen=$x.Current.IsOffscreen}
+            } catch {}
+          }
           [ordered]@{
             OS=$os.Caption;Build=$os.BuildNumber;TaskbarHWND=[string]$bar
             CurrentSession=([Diagnostics.Process]::GetCurrentProcess().SessionId)
             ExplorerProcesses=@(Get-Process explorer|ForEach-Object{@{PID=$_.Id;Session=$_.SessionId}})
             StartButtonAutomationCount=$found.Count;Elements=$items
-          } | ConvertTo-Json -Depth 7 | Write-Host
+            TotalDescendants=$all.Count;Sample=$sample
+          } | ConvertTo-Json -Depth 9 | Write-Host
           Write-Host 'PASS: UI Automation interrogated native Windows 11 taskbar without application injection'
