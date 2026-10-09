@@ -140,6 +140,7 @@ public static class ShellProbe {
     New-ItemProperty -Path $reg -Name AllTaskbars -PropertyType DWord -Value 0 -Force|Out-Null
     $case=[ordered]@{Iteration=$i;EnableStartButton=$enabled;Started=(Get-Date).ToString('o')}
     $cycles.Add($case)
+    $case['ExplorerPidsBefore']=@((ProcessList 'explorer')|ForEach-Object Id)
     Publish ('CYCLE_'+$i+'_START')
     $p=Start-Process -FilePath $exe -PassThru
     $case['LaunchedPID']=$p.Id
@@ -160,11 +161,14 @@ public static class ShellProbe {
     for($w=0;$w -lt 15 -and (ProcessList 'StartMenu').Count -gt 0;$w++){Start-Sleep -Seconds 2}
     $case['MenuStopped']=((ProcessList 'StartMenu').Count -eq 0)
     $case['ExplorerAfterStop']=((ProcessList 'explorer').Count -gt 0)
+    $case['ExplorerPidsAfterStop']=@((ProcessList 'explorer')|ForEach-Object Id)
+    $case['ExplorerPidContinuity']=(@($case['ExplorerPidsBefore']|Where-Object {$case['ExplorerPidsAfterStop'] -contains $_}).Count -gt 0)
     $case['NativeStartUIAAfterStop']=UIAStart
     Screenshot ('tap-cycle-'+$i+'-stopped')
     Publish ('CYCLE_'+$i+'_STOPPED')
     Check $case['MenuStopped'] ('StartMenu.exe did not exit cycle '+$i)
     Check $case['ExplorerAfterStop'] ('Explorer died on shutdown cycle '+$i)
+    Check $case['ExplorerPidContinuity'] ('Explorer process restarted during cycle '+$i)
     $case['Passed']=$true
     Publish ('CYCLE_'+$i+'_PASSED')
   }
