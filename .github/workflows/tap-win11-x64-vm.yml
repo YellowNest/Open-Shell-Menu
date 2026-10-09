@@ -1,0 +1,134 @@
+name: Native Windows 11 x64 Explorer VM and Open-Shell integration
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-x64-vm.yml'
+
+jobs:
+  native-win11-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Check out isolated test scripts
+        uses: actions/checkout@v4
+        with:
+          ref: review/tap-win11-arm-probe-20261009
+
+      - name: Verify hardware virtualization and stage unattended guest scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          import fcntl, os
+          if os.uname().machine != 'x86_64':
+              raise SystemExit('BLOCKED: host is not native x64')
+          fd = os.open('/dev/kvm', os.O_RDWR)
+          try:
+              v = fcntl.ioctl(fd, 0xAE00)
+              if v != 12: raise SystemExit('BLOCKED: KVM API unsupported')
+              print('PASS: KVM_API_VERSION=12, host=x86_64')
+          finally:
+              os.close(fd)
+          PY
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
+          cp .github/tap-tests/install.bat "$ROOT/oem/"
+          cp .github/tap-tests/win11_native_x64_guest_probe.ps1 "$ROOT/oem/"
+          echo "Staged guest verification script"
+
+      - name: Retrieve already-built hardened installer when artifact endpoint works
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          if gh run download 37966360367 -R YellowNest/Open-Shell-Menu -n OpenShellSetup_4_4_202.exe -D "$ROOT/shared"; then
+            echo 'VALIDATED_INSTALLER_STAGED=yes'
+            find "$ROOT/shared" -maxdepth 1 -type f -printf '%f %s bytes\n'
+          else
+            echo 'VALIDATED_INSTALLER_STAGED=no'
+            echo 'Guest OS/Explorer verification will continue without false app test claims.'
+          fi
+
+      - name: Install native x64 Windows 11 inside nested QEMU-KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          sudo docker pull dockurr/windows:latest
+          PASS=$(openssl rand -hex 16)
+          sudo docker run -d --name openshell-win11-native-x64 \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -p 127.0.0.1:8006:8006 \
+            -e VERSION=11 -e RAM_SIZE=7G -e CPU_CORES=4 \
+            -e DISK_SIZE=48G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
+            -e LOG=Y \
+            -v "$ROOT/storage:/storage" -v "$ROOT/oem:/oem" -v "$ROOT/shared:/shared" \
+            dockurr/windows:latest
+          echo 'NATIVE_X64_VM_CONTAINER_STARTED'
+          found=0
+          for n in $(seq 1 184); do
+            if test -s "$ROOT/shared/win11-native-x64-proof.json"; then
+              cp "$ROOT/shared/win11-native-x64-proof.json" "$ROOT/evidence/"
+              echo 'GUEST_REPORT_FOUND'
+              cat "$ROOT/shared/win11-native-x64-proof.json"
+              found=1
+              break
+            fi
+            if ! sudo docker inspect -f '{{.State.Running}}' openshell-win11-native-x64 | grep -q true; then
+              echo 'VM_EXITED_BEFORE_REPORT'
+              break
+            fi
+            if (( n % 8 == 0 )); then
+              echo "VM_POLL=$n"
+              sudo docker logs --tail 12 openshell-win11-native-x64 2>&1 || true
+              df -h "$ROOT"
+            fi
+            sleep 15
+          done
+          if test "$found" -eq 0; then
+            echo 'NO_WINDOWS_GUEST_REPORT'
+            exit 3
+          fi
+          python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8-sig') as f:
+              result=json.load(f)
+          if result.get('NativeWindows11X64') is not True:
+              raise SystemExit('FAILED: Windows guest not proven native x64 Windows 11')
+          if result.get('ExplorerRunning') is not True:
+              raise SystemExit('FAILED: explorer.exe not proven running')
+          print('PASS: genuine native Windows 11 x64 and explorer.exe observed from inside guest')
+          print('Taskbar:', result.get('TaskbarDetected'))
+          print('Open-Shell integration:', result.get('OpenShellIntegration', 'not run'))
+          PY
+
+      - name: Preserve guest VM logs even on failure
+        if: always()
+        shell: bash
+        run: |
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          mkdir -p "$ROOT/evidence"
+          if sudo docker inspect openshell-win11-native-x64 > /dev/null 2>&1; then
+            sudo docker logs --tail 400 openshell-win11-native-x64 > "$ROOT/evidence/virtual-machine.log" 2>&1 || true
+            sudo docker rm -f openshell-win11-native-x64 > /dev/null 2>&1 || true
+          fi
+          cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
+          df -h / > "$ROOT/evidence/storage.txt" || true
+          ls -lah "$ROOT/evidence"
+
+      - name: Upload native Windows 11 x64 guest evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-win11-x64-real-explorer-evidence
+          path: ${{ runner.temp }}/win11-native-x64/evidence/
+          if-no-files-found: warn
+          retention-days: 7
