@@ -40,7 +40,7 @@ jobs:
           ROOT="$RUNNER_TEMP/win11-native-x64"
           mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
           cp .github/tap-tests/install.bat "$ROOT/oem/"
-          cp .github/tap-tests/win11_native_x64_guest_probe.ps1 "$ROOT/oem/"
+          cp .github/tap-tests/win11_native_x64_stress.ps1 "$ROOT/oem/"
           echo "Staged guest verification script"
 
       - name: Fetch raw v7 installer with compatible v8 download action
@@ -134,13 +134,19 @@ jobs:
           assert result.get('Terminal') is True, result
           assert result.get('Stage') == 'TEST_COMPLETE', result
           integration=result.get('OpenShellIntegration')
-          assert integration=='START_STOP_EXECUTED_NOT_XAML_VISUALLY_VERIFIED', integration
+          assert integration=='FOUR_X64_LIFECYCLE_CYCLES_AND_XAML_CONNECTION_VERIFIED', integration
           assert result.get('InstallerExit') in (0,3010),result
-          assert result.get('StartMenuRunning') is True,result
-          assert result.get('ExplorerAliveAfterStart') is True,result
-          assert result.get('ExplorerAliveAfterStop') is True,result
-          print('PASS: hardened Open-Shell x64 installation, StartMenu start/stop and Explorer survival')
-          print('LIMITATION: XAML visual restore and centered taskbar appearance still untested')
+          cases=result.get('Cycles',[])
+          assert len(cases)==4,cases
+          assert all(x.get('Passed') is True and x.get('MenuStopped') is True and x.get('ExplorerAfterStop') is True for x in cases),cases
+          assert sum(x.get('EnableStartButton')==1 for x in cases)==3,cases
+          assert all(x.get('HelperLoadedInExplorer') is True for x in cases if x.get('EnableStartButton')==1),cases
+          assert len(result.get('XamlConnectedLogLines',[]))>0,result
+          assert len(result.get('XamlFailureLogLines',[]))==0,result
+          assert len(result.get('CrashOrHangEvents',[]))==0,result
+          print('PASS: four real native x64 Explorer/Open-Shell lifecycle cycles with 3 XAML-enabled cases')
+          print('PASS: helper DLL observed, XAML diagnostics connection reported and no recorded startup/teardown failure')
+          print('LIMITATION: UIAutomation and screenshots are observations, NOT proof of precise XAML property restoration')
           PY
 
       - name: Preserve guest VM logs even on failure
@@ -154,6 +160,8 @@ jobs:
             sudo docker rm -f openshell-win11-native-x64 > /dev/null 2>&1 || true
           fi
           cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.png "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/openshell-startup.txt" "$ROOT/evidence/" 2>/dev/null || true
           df -h / > "$ROOT/evidence/storage.txt" || true
           ls -lah "$ROOT/evidence"
 
