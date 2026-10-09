@@ -1,0 +1,131 @@
+name: Open-Shell TAP Windows 11 ARM64 smoke test
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  runtime-smoke:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    steps:
+      - name: Download validated Open-Shell installer
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 37966360367
+          github-token: ${{ github.token }}
+          name: OpenShellSetup_4_4_202.exe
+          path: ${{ runner.temp }}/tap-installer
+
+      - name: Install and exercise Open-Shell in actual Explorer desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'tap-evidence'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $installLog = Join-Path $dir 'msi-install.log'
+          $installer = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'tap-installer') -Recurse -File -Filter 'OpenShellSetup*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Installer artifact is missing.' }
+
+          function Save-State([string]$stage) {
+            $explorer = @(Get-Process explorer -ErrorAction SilentlyContinue)
+            $openShell = @(Get-Process StartMenu -ErrorAction SilentlyContinue)
+            $modules = @()
+            foreach ($process in $explorer) {
+              try {
+                $modules += @($process.Modules | Where-Object { $_.ModuleName -match 'StartMenu|OpenShell|Open-Shell' } | ForEach-Object { $_.ModuleName })
+              } catch {
+                Write-Warning "Cannot enumerate Explorer modules: $_"
+              }
+            }
+            $record = [ordered]@{
+              Stage=$stage; Timestamp=(Get-Date).ToString('o')
+              ExplorerProcessIds=@($explorer | ForEach-Object Id)
+              OpenShellProcessIds=@($openShell | ForEach-Object Id)
+              InjectedModules=@($modules)
+            }
+            $record | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $dir "$stage.json") -Encoding utf8
+            $record | ConvertTo-Json -Depth 5 | Write-Host
+            if ($explorer.Count -eq 0) { throw "Explorer is not running at stage $stage" }
+          }
+
+          function Save-Screen([string]$stage) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing -ErrorAction Stop
+              $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+              if (-not $screen) { throw 'No primary screen' }
+              $rect = $screen.Bounds
+              $bitmap = New-Object System.Drawing.Bitmap($rect.Width, $rect.Height)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try {
+                $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+                $bitmap.Save((Join-Path $dir "$stage.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+              } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            } catch {
+              Write-Warning "Screenshot unavailable: $_"
+            }
+          }
+
+          Save-State 'baseline'
+          Save-Screen 'baseline'
+          Write-Host "Installer: $($installer.FullName)"
+          $args = '/qn ADDLOCAL=StartMenu NOSTART=1 REBOOT=ReallySuppress /l*v "' + $installLog + '"'
+          $inst = Start-Process -FilePath $installer.FullName -ArgumentList $args -Wait -PassThru
+          Write-Host "Installer exit code: $($inst.ExitCode)"
+          if ($inst.ExitCode -notin @(0,3010)) {
+            if (Test-Path $installLog) { Get-Content $installLog -Tail 100 | Write-Host }
+            throw "Installation failed with code $($inst.ExitCode)"
+          }
+          $exe = Join-Path $env:ProgramFiles 'Open-Shell\StartMenu.exe'
+          if (-not (Test-Path $exe)) {
+            Get-ChildItem $env:ProgramFiles -Directory | Select-Object Name | Format-Table | Out-String | Write-Host
+            throw "StartMenu.exe was not installed at $exe"
+          }
+          Save-State 'installed'
+          $started = Start-Process -FilePath $exe -PassThru
+          Write-Host "Started StartMenu.exe pid=$($started.Id)"
+          Start-Sleep -Seconds 12
+          Save-State 'running'
+          Save-Screen 'running'
+          $active = @(Get-Process StartMenu -ErrorAction SilentlyContinue)
+          if ($active.Count -eq 0) { throw 'StartMenu.exe exited unexpectedly during startup' }
+
+          Start-Process -FilePath $exe -ArgumentList '-exit' -Wait
+          Start-Sleep -Seconds 8
+          Save-State 'stopped'
+          Save-Screen 'stopped'
+          $remaining = @(Get-Process StartMenu -ErrorAction SilentlyContinue)
+          if ($remaining.Count -gt 0) {
+            Write-Warning 'StartMenu.exe still running after -exit; inspect teardown'
+          }
+
+          $crashes = @(Get-WinEvent -FilterHashtable @{
+            LogName='Application'; StartTime=(Get-Date).AddMinutes(-25); Id=1000,1001,1002
+          } -ErrorAction SilentlyContinue | Where-Object {
+            $_.Message -match 'explorer.exe|StartMenu.exe|StartMenuDLL|StartMenuHelper'
+          } | Select-Object -First 30)
+          $crashes | ForEach-Object {
+            [ordered]@{ Timestamp=$_.TimeCreated.ToString('o'); Id=$_.Id; Provider=$_.ProviderName; Message=$_.Message }
+          } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $dir 'crashes.json')
+          if ($crashes.Count -gt 0) {
+            $crashes | ForEach-Object { Write-Warning "Potential crash event: $($_.Id) $($_.Message.Substring(0,[Math]::Min($_.Message.Length,220)))" }
+            throw 'Windows recorded relevant application crashes or hangs during test'
+          }
+          Write-Host 'Smoke test passed: installer, Explorer survival, Open-Shell startup and shutdown.'
+
+      - name: Upload screenshots logs and process/module evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows11-arm64-openshell-smoke-evidence
+          path: ${{ runner.temp }}/tap-evidence/
+          if-no-files-found: warn
+          retention-days: 7
