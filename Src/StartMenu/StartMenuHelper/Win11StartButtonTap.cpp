@@ -479,7 +479,8 @@ public:
 
 	~CXamlDiagnosticsTap( void )
 	{
-		DestroyDispatchWindow();
+		// WM_NCDESTROY releases the dispatch window's own COM reference.
+		ATLASSERT(m_Dispatch == NULL);
 		_AtlModule.Unlock();
 	}
 
@@ -552,7 +553,13 @@ public:
 				g_ConnectStarted = false;
 		}
 		if (!active)
+		{
+			// An unused site must not pin a dispatch window forever.
+			HRESULT closeHr = DestroyDispatchWindow();
+			if (FAILED(closeHr))
+				LogToFile(STARTUP_LOG, L"Win11StartButtonTap: idle window close failed 0x%08X", closeHr);
 			return S_OK;
+		}
 
 		hr = ActivateLocked();
 		if (FAILED(hr))
@@ -560,6 +567,10 @@ public:
 			// Retain any callback that a failed Unadvise could not unregister.
 			if (!m_Advised)
 			{
+				// No callback remains registered; close the unused window.
+				HRESULT closeHr = DestroyDispatchWindow();
+				if (FAILED(closeHr))
+					LogToFile(STARTUP_LOG, L"Win11StartButtonTap: activation close failed 0x%08X", closeHr);
 				CComPtr<CXamlDiagnosticsTap> released;
 				{
 					std::unique_lock lock(g_TapMutex);
@@ -678,7 +689,7 @@ private:
 	HRESULT DeactivateLocked( void )
 	{
 		if (!m_Visual)
-			return S_OK;
+			return DestroyDispatchWindow();
 
 		// First reject queued enable work. The dispatch thread drains queued
 		// messages and restores native properties before we unsubscribe.
@@ -831,7 +842,20 @@ private:
 		{
 			CREATESTRUCT *create = (CREATESTRUCT*)lParam;
 			tap = (CXamlDiagnosticsTap*)create->lpCreateParams;
+			// The HWND retains a strong reference until WM_NCDESTROY.
+			tap->AddRef();
 			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)tap);
+		}
+		if (msg == WM_NCDESTROY && tap)
+		{
+			// This is the final message: clear the raw pointer before
+			// releasing the HWND's own COM reference.
+			SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+			if (tap->m_Dispatch == hwnd)
+				tap->m_Dispatch = NULL;
+			LRESULT result = DefWindowProc(hwnd, msg, wParam, lParam);
+			tap->Release();
+			return result;
 		}
 		if (msg == WM_OS_STARTBUTTON_DESTROY && tap)
 			return static_cast<LRESULT>(tap->DestroyDispatchWindow());
@@ -851,6 +875,7 @@ private:
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
+	friend class CStartButtonTapFactory;
 	std::atomic<ULONG> m_Refs{ 1 };
 	HRESULT m_DispatchStatus = E_UNEXPECTED;
 	std::atomic_bool m_Advised{ false };
@@ -901,9 +926,11 @@ public:
 		if (!tap)
 			return E_OUTOFMEMORY;
 		HRESULT hr = tap->DispatchStatus();
+		if (SUCCEEDED(hr))
+			hr = tap->QueryInterface(riid, ppv);
 		if (FAILED(hr))
-			return hr;
-		return tap->QueryInterface(riid, ppv);
+			tap->DestroyDispatchWindow();
+		return hr;
 	}
 
 	STDMETHODIMP LockServer( BOOL lock )
