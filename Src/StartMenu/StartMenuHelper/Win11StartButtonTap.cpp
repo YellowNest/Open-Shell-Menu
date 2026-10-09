@@ -529,31 +529,43 @@ public:
 
 		CComPtr<IVisualTreeService> visual;
 		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&visual);
-		if (FAILED(hr))
-			return hr;
-		if (!visual)
-			return E_NOINTERFACE;
+		if (FAILED(hr) || !visual)
+		{
+			m_SiteAssigned = true;
+			HRESULT closeHr = DestroyDispatchWindow();
+			if (FAILED(closeHr))
+				LogToFile(STARTUP_LOG, L"Win11StartButtonTap: failed site close 0x%08X", closeHr);
+			return FAILED(hr) ? hr : E_NOINTERFACE;
+		}
 
-		bool active;
+		bool active, duplicate = false;
 		{
 			std::unique_lock lock(g_TapMutex);
 			active = g_StartButtonActive;
-			if (active && g_Tap)
-				return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
-
+			duplicate = active && g_Tap;
 			m_SiteAssigned = true;
-			if (active)
+			if (!duplicate)
 			{
+				if (active)
 				{
-					std::lock_guard siteLock(m_SiteMutex);
-					m_Site = site;
+					{
+						std::lock_guard siteLock(m_SiteMutex);
+						m_Site = site;
+					}
+					m_Visual = visual;
+					m_StartTree.SetVisual(visual);
+					g_Tap = this;
 				}
-				m_Visual = visual;
-				m_StartTree.SetVisual(visual);
-				g_Tap = this;
+				else
+					g_ConnectStarted = false;
 			}
-			else
-				g_ConnectStarted = false;
+		}
+		if (duplicate)
+		{
+			HRESULT closeHr = DestroyDispatchWindow();
+			if (FAILED(closeHr))
+				LogToFile(STARTUP_LOG, L"Win11StartButtonTap: duplicate site close 0x%08X", closeHr);
+			return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
 		}
 		if (!active)
 		{
