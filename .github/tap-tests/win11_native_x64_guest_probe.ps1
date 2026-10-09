@@ -36,6 +36,7 @@ public static class ShellProbe {
     Build=$os.BuildNumber
     OSArchitecture=$arch
     ProcessArchitecture=$processArch
+    CurrentSessionId=([Diagnostics.Process]::GetCurrentProcess().SessionId)
     Processor=$cpu.Name
     ExplorerProcesses=@($explorer | ForEach-Object { [ordered]@{Id=$_.Id;SessionId=$_.SessionId} })
     TaskbarHwnd=[string]$taskbar
