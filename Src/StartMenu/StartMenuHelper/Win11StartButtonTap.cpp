@@ -20,6 +20,7 @@
 #include <ocidl.h>
 #include <atomic>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -897,7 +898,7 @@ public:
 			return CLASS_E_NOAGGREGATION;
 
 		CComPtr<CXamlDiagnosticsTap> tap;
-		tap.Attach(new CXamlDiagnosticsTap());
+		tap.Attach(new (std::nothrow) CXamlDiagnosticsTap());
 		if (!tap)
 			return E_OUTOFMEMORY;
 		HRESULT hr = tap->DispatchStatus();
