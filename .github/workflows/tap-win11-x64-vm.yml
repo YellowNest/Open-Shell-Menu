@@ -68,7 +68,7 @@ jobs:
             --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
             -p 127.0.0.1:8006:8006 \
             -e VERSION=11 -e RAM_SIZE=7G -e CPU_CORES=4 \
-            -e DISK_SIZE=48G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
+            -e DISK_SIZE=64G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
             -e LOG=Y \
             -v "$ROOT/storage:/storage" -v "$ROOT/oem:/oem" -v "$ROOT/shared:/shared" \
             dockurr/windows:latest
