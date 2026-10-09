@@ -109,8 +109,15 @@ public static class ShellProbe {
   $hash=(Get-FileHash $local -Algorithm SHA256).Hash.ToLowerInvariant()
   $state['InstallerSHA256']=$hash
   Check ($hash -eq '10f976b90127f6d7a402a9934949de50eeffa71f6687133f9f88b5b23692882f') 'Wrong hardened installer hash'
+  # Set logging before the installer or Explorer can load any Open-Shell DLL.
+  $reg='HKCU:\Software\OpenShell\StartMenu\Settings'
+  New-Item -Path $reg -Force|Out-Null
+  New-ItemProperty -Path $reg -Name LogStartup -PropertyType DWord -Value 1 -Force|Out-Null
+  New-ItemProperty -Path $reg -Name EnableStartButton -PropertyType DWord -Value 0 -Force|Out-Null
   Publish 'INSTALLING'
-  $code=WaitProcess $local '/qn REBOOT=ReallySuppress /l*v "C:\OEM\openshell-msi.log"' 300 'INSTALL_RUNNING'
+  # Wix LaunchStartMenu normally starts Open-Shell after MSI; avoid a competing
+  # uncontrolled instance and any startup-log initialization before our cycles.
+  $code=WaitProcess $local '/qn NOSTART=1 REBOOT=ReallySuppress /l*v "C:\OEM\openshell-msi.log"' 300 'INSTALL_RUNNING'
   $state['InstallerExit']=$code
   Check ($code -in @(0,3010)) ('MSI install failed '+$code)
   $exe=Join-Path $env:ProgramFiles 'Open-Shell\StartMenu.exe'
