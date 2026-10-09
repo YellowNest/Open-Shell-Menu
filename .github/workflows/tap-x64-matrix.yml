@@ -9,6 +9,7 @@ on:
       - review/tap-win11-arm-probe-20261009
     paths:
       - '.github/workflows/tap-x64-matrix.yml'
+      - '.github/tap-tests/tap_com_smoke.cpp'
   workflow_dispatch:
 
 jobs:
