@@ -474,7 +474,7 @@ public:
 	CXamlDiagnosticsTap( void )
 	{
 		_AtlModule.Lock();
-		// Each TAP owns exactly one message window for its entire lifetime.
+		// Construct the dispatch window once; deactivation removes it.
 		m_DispatchStatus = CreateDispatchWindow();
 	}
 
@@ -694,8 +694,8 @@ private:
 			return hr;
 		}
 
-		// The callback must remain valid until Unadvise completes. The idle
-		// dispatch window is destroyed by the TAP destructor.
+		// Keep both the callback and dispatch window alive until Unadvise
+		// completes; then close the idle window.
 		if (m_Visual && m_Advised)
 		{
 			hr = m_Visual->UnadviseVisualTreeChange(
