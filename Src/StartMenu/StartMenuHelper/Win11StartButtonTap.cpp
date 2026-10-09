@@ -544,7 +544,10 @@ public:
 			m_SiteAssigned = true;
 			if (active)
 			{
-				m_Site = site;
+				{
+					std::lock_guard siteLock(m_SiteMutex);
+					m_Site = site;
+				}
 				m_Visual = visual;
 				m_StartTree.SetVisual(visual);
 				g_Tap = this;
@@ -589,9 +592,13 @@ public:
 		if (!ppv)
 			return E_POINTER;
 		*ppv = NULL;
-		if (!m_Site)
-			return E_FAIL;
-		return m_Site->QueryInterface(riid, ppv);
+		CComPtr<IUnknown> site;
+		{
+			// Hold an independent reference before another thread clears m_Site.
+			std::lock_guard siteLock(m_SiteMutex);
+			site = m_Site;
+		}
+		return site ? site->QueryInterface(riid, ppv) : E_FAIL;
 	}
 
 	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
@@ -732,7 +739,13 @@ private:
 		m_StartTree.ResetElements();
 		m_StartTree.SetVisual(NULL);
 		m_Visual.Release();
-		m_Site.Release();
+		CComPtr<IUnknown> releasedSite;
+		{
+			std::lock_guard siteLock(m_SiteMutex);
+			releasedSite.Attach(m_Site.Detach());
+		}
+		// Release outside the site mutex: COM may call GetSite again.
+		releasedSite.Release();
 		m_Deactivating = false;
 		return S_OK;
 	}
@@ -884,6 +897,7 @@ private:
 	std::atomic_bool m_Deactivating{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
 	std::mutex m_LifecycleMutex;
+	std::mutex m_SiteMutex;
 	bool m_SiteAssigned = false;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
