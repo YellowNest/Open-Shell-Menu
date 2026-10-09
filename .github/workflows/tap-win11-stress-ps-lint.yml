@@ -30,6 +30,7 @@ jobs:
             throw "PS7 parser errors: $($errors.Count)"
           }
           Write-Host 'PASS: PowerShell 7 guest stress test parsing'
-          $testScript = '$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e)|Out-Null;if($e.Count -gt 0){$e|ForEach-Object {Write-Host $_.ToString()};exit 1}else{Write-Host "PASS: Windows PowerShell 5.1 parsing"}'
-          & powershell.exe -NoProfile -NonInteractive -Command $testScript $path
+          $escapedPath = $path.Replace("'","''")
+          $testScript = '$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile(' + "'" + $escapedPath + "'" + ',[ref]$t,[ref]$e)|Out-Null;if($e.Count -gt 0){$e|ForEach-Object {Write-Host $_.ToString()};exit 1}else{Write-Host "PASS: Windows PowerShell 5.1 parsing"}'
+          & powershell.exe -NoProfile -NonInteractive -Command $testScript
           if($LASTEXITCODE -ne 0) {throw "Windows PowerShell 5.1 parser failed: $LASTEXITCODE"}
