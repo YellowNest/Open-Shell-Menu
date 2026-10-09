@@ -13,18 +13,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
-      - name: Download exact tested installer and verify file type
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download direct uncompressed v7 artifact using compatible v8 action
+        uses: actions/download-artifact@v8
+        with:
+          name: OpenShellSetup_4_4_202.exe
+          run-id: 37966360367
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/installer
+      - name: Verify PE executable and file size
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/installer"
-          gh run download 37966360367 -R YellowNest/Open-Shell-Menu -n OpenShellSetup_4_4_202.exe -D "$RUNNER_TEMP/installer"
-          find "$RUNNER_TEMP/installer" -type f -maxdepth 2 -printf '%f %s bytes\n'
           f=$(find "$RUNNER_TEMP/installer" -type f -name '*.exe' | head -1)
           test -n "$f"
           file "$f"
-          size=$(stat -c '%s' "$f")
-          test "$size" -gt 3000000
-          echo "PASS: hardened installer artifact accessible from Ubuntu CI host"
+          bytes=$(stat -c '%s' "$f")
+          echo "INSTALLER_BYTES=$bytes"
+          test "$bytes" -gt 3000000
+          python3 - "$f" <<'PY'
+          import pathlib,sys
+          assert pathlib.Path(sys.argv[1]).open('rb').read(2)==b'MZ'
+          print('PASS: real PE installer retrieved in non-zipped form')
+          PY
