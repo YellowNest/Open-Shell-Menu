@@ -1,0 +1,45 @@
+name: Lint native Windows 11 x64 TAP stress PowerShell
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-stress-ps-lint.yml'
+
+jobs:
+  powershell-parse:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: review/tap-win11-arm-probe-20261009
+      - name: Parse guest automation using real Windows PowerShell 5.1 and PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $source = [IO.File]::ReadAllText((Join-Path $PWD '.github/tap-tests/win11_native_x64_stress.ps1'))
+          foreach($exe in @('powershell.exe','pwsh.exe')) {
+            Write-Host "VALIDATE: $exe"
+            & $exe -NoProfile -NonInteractive -Command @'
+          $tokens=$null;$errors=$null
+          [System.Management.Automation.Language.Parser]::ParseInput(
+              [Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null
+          if($errors.Count -gt 0) {
+             $errors|ForEach-Object { Write-Host $_.ToString() }
+             exit 1
+          }
+          Write-Host 'PASS: syntax is valid'
+          '@ 2>&1 | Write-Host
+          }
+          $tokens=$null;$errors=$null
+          [System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)|Out-Null
+          if($errors.Count -gt 0) {
+            $errors|ForEach-Object {Write-Host $_.ToString()}
+            throw "Syntax errors: $($errors.Count)"
+          }
+          Write-Host 'PASS: guest test PowerShell AST'
