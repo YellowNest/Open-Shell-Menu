@@ -1,0 +1,88 @@
+name: TAP x64 COM tests across Windows 11 and native x64
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-x64-matrix.yml'
+  workflow_dispatch:
+
+jobs:
+  x64-com-lifetime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-11-arm
+            host: arm64
+            toolset: v145
+            expectedOS: Microsoft Windows 11
+            label: win11-x64-emulated
+          - runner: windows-2022
+            host: x64
+            toolset: v143
+            expectedOS: Microsoft Windows Server
+            label: server-native-x64
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - name: Checkout isolated test sources
+        uses: actions/checkout@v4
+        with:
+          ref: review/tap-win11-arm-probe-20261009
+          fetch-depth: 0
+
+      - name: Verify tested TAP sources match clean branch
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin review/tap-lifetime-hardened-clean-20261009
+          git diff --exit-code 'origin/review/tap-lifetime-hardened-clean-20261009' HEAD -- 'Src/StartMenu/StartMenuHelper/Win11StartButtonTap.cpp' 'Src/StartMenu/StartMenuDLL/StartMenuDLL.cpp'
+          if ($LASTEXITCODE -ne 0) { throw 'Modified product code in test branch' }
+
+      - name: Validate OS and build native x64 application binaries
+        shell: pwsh
+        env:
+          TOOLSET: ${{ matrix.toolset }}
+          EXPECTED_OS: ${{ matrix.expectedOS }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $os=Get-CimInstance Win32_OperatingSystem
+          Write-Host "HOST_OS=$($os.Caption) BUILD=$($os.BuildNumber) ARCH=$($os.OSArchitecture)"
+          Write-Host "PROCESS_ARCH=$([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          if ($os.Caption -notmatch [regex]::Escape($env:EXPECTED_OS)) { throw "Unexpected OS: $($os.Caption)" }
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          if (-not $vs) { throw 'Visual Studio unavailable' }
+          $msbuild=Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Restore' '/p:RestorePackagesConfig=true' '/verbosity:minimal' '/nologo'
+          if ($LASTEXITCODE -ne 0) { throw "Restore failed: $LASTEXITCODE" }
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Rebuild' '/p:Configuration=Setup' '/p:Platform=x64' "/p:PlatformToolset=$env:TOOLSET" '/verbosity:minimal' '/nologo'
+          if ($LASTEXITCODE -ne 0) { throw "x64 source compilation failed: $LASTEXITCODE" }
+          Write-Host "PASS: x64 Open-Shell build on $($os.Caption)"
+
+      - name: Run x64 COM and HWND lifecycle test
+        shell: pwsh
+        env:
+          BUILD_HOST: ${{ matrix.host }}
+          TEST_LABEL: ${{ matrix.label }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          $devcmd=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $testExe=Join-Path $env:RUNNER_TEMP 'tap_com_smoke_x64.exe'
+          $testCpp='.github\tap-tests\tap_com_smoke.cpp'
+          $command='call "'+$devcmd+'" -arch=x64 -host_arch='+$env:BUILD_HOST+' >nul && cl.exe /nologo /EHsc /W4 /std:c++17 "'+$testCpp+'" /Fe:"'+$testExe+'" /link ole32.lib user32.lib'
+          & cmd.exe /d /c $command
+          if ($LASTEXITCODE -ne 0) { throw "x64 harness compile failed: $LASTEXITCODE" }
+          $dll=Get-ChildItem (Join-Path $PWD 'build\bin') -Recurse -Filter StartMenuHelper64.dll -File | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dll) { throw 'x64 helper DLL missing' }
+          Write-Host "TEST_MODE=$env:TEST_LABEL DLL=$dll"
+          & $testExe $dll
+          if ($LASTEXITCODE -ne 0) { throw "x64 TAP lifetime test failed: $LASTEXITCODE" }
+          Write-Host "PASS: $env:TEST_LABEL x64 COM/HWND lifetime stress"
