@@ -1,4 +1,4 @@
-// Isolated Windows 11 ARM64 COM smoke test. Not part of Open-Shell production.
+// Isolated Windows 11 x64/ARM64 COM stress test. Not part of Open-Shell production.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <ocidl.h>
@@ -58,7 +58,7 @@ int wmain(int argc, wchar_t* argv[])
         reinterpret_cast<void**>(&factory));
     if (FAILED(hr) || !factory) return fail(L"DllGetClassObject", hr);
 
-    for (int i = 0; i < 40; ++i)
+    for (int i = 0; i < 400; ++i)
     {
         IObjectWithSite* site = nullptr;
         hr = factory->CreateInstance(nullptr, IID_IObjectWithSite, reinterpret_cast<void**>(&site));
@@ -71,7 +71,12 @@ int wmain(int argc, wchar_t* argv[])
 
         hr = site->SetSite(nullptr);
         if (FAILED(hr)) return fail(L"SetSite(nullptr)", hr);
+        hr = site->SetSite(nullptr);
+        if (FAILED(hr)) return fail(L"SetSite(nullptr) twice: non-idempotent shutdown", hr);
         if (FindTapWindow()) return fail(L"dispatch HWND leaked after SetSite(nullptr)", E_FAIL);
+        IUnknown* clearedSite = nullptr;
+        hr = site->GetSite(IID_IUnknown, reinterpret_cast<void**>(&clearedSite));
+        if (hr != E_FAIL || clearedSite) return fail(L"site retained after shutdown", hr);
         site->Release();
     }
 
@@ -95,12 +100,17 @@ int wmain(int argc, wchar_t* argv[])
         return fail(L"unsupported COM interface did not fail safely", hr);
     if (FindTapWindow()) return fail(L"dispatch HWND leaked on unsupported IID", E_FAIL);
 
+    hr = factory->LockServer(TRUE);
+    if (FAILED(hr)) return fail(L"LockServer(TRUE)", hr);
+    if (canUnload() != S_FALSE) return fail(L"DllCanUnloadNow did not honor LockServer(TRUE)", E_FAIL);
+    hr = factory->LockServer(FALSE);
+    if (FAILED(hr)) return fail(L"LockServer(FALSE)", hr);
     factory->Release();
     hr = canUnload();
     if (hr != S_OK) return fail(L"DllCanUnloadNow should report no active TAP", hr);
     FreeLibrary(library);
     CoUninitialize();
-    std::wcout << L"PASS: 40 Create/SetSite(nullptr)/destroy cycles, "
-                  L"invalid site, unsupported interface, COM unload eligibility" << std::endl;
+    std::wcout << L"PASS: 400 COM/dispatch lifetime cycles, repeated SetSite(nullptr), "
+                  L"invalid site, unsupported interface, LockServer and unload eligibility" << std::endl;
     return 0;
 }
