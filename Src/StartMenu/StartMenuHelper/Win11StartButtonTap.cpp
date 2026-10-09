@@ -583,7 +583,7 @@ public:
 
 	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
 	{
-		if (m_StartTree.OnVisualTreeChange(relation, element, mutationType) && m_Advised)
+		if (m_StartTree.OnVisualTreeChange(relation, element, mutationType) && m_Advised && m_AllowEnable)
 			RequestApply(g_StartButtonActive && g_StartButtonEnabled);
 		return S_OK;
 	}
