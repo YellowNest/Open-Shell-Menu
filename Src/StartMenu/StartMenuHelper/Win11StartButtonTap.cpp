@@ -930,8 +930,9 @@ static DWORD WINAPI ConnectThread( LPVOID param )
 			(InitXamlDiagnosticsEx_t)GetProcAddress(runtime, "InitializeXamlDiagnosticsEx");
 		if (init)
 		{
+			HMODULE module = GetThisModule();
 			wchar_t dllPath[MAX_PATH];
-			DWORD length = GetModuleFileName(GetThisModule(), dllPath, _countof(dllPath));
+			DWORD length = module ? GetModuleFileName(module, dllPath, _countof(dllPath)) : 0;
 			if (length && length < _countof(dllPath))
 			{
 				const wchar_t *endpoints[] = { L"VisualDiagConnection1", L"VisualDiagConnection2" };
