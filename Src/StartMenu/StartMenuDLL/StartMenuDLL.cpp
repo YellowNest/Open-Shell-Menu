@@ -2644,7 +2644,9 @@ void UpdateTaskBars( TUpdateTaskbar update )
 		InvalidateRect(taskBar.taskBar,NULL,TRUE);
 		PostMessage(taskBar.taskBar,WM_THEMECHANGED,0,0);
 	}
-	UpdateWin11StartButtonMonitor();
+	// Cleanup has already closed settings; it must not reinitialize the TAP.
+	if (update != TASKBAR_CLEAR)
+		UpdateWin11StartButtonMonitor();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
