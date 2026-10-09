@@ -244,7 +244,7 @@ public:
 				m_Elements[element.Handle] = record;
 
 				interesting = IsStartControlCandidate(record) || IsStartGlyph(record) ||
-					IsUnderStartButtonLocked(record.parent);
+					FindStartAncestorLocked(record.parent) != 0;
 			}
 		}
 
@@ -519,7 +519,7 @@ private:
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
-	bool IsUnderStartButtonLocked( InstanceHandle parent ) const
+	InstanceHandle FindStartAncestorLocked( InstanceHandle parent ) const
 	{
 		for (int depth = 0; depth < 24 && parent; depth++)
 		{
@@ -527,34 +527,17 @@ private:
 			if (it == m_Elements.end())
 				break;
 			if (it->second.isStartControl)
-				return true;
+				return parent;
 			parent = it->second.parent;
 		}
-		return false;
+		return 0;
 	}
 
 	InstanceHandle GetStartAncestor( InstanceHandle handle )
 	{
 		std::lock_guard lock(m_Mutex);
-		InstanceHandle result = 0;
 		auto it = m_Elements.find(handle);
-		if (it != m_Elements.end())
-		{
-			InstanceHandle parent = it->second.parent;
-			for (int depth = 0; depth < 24 && parent; depth++)
-			{
-				auto pit = m_Elements.find(parent);
-				if (pit == m_Elements.end())
-					break;
-				if (pit->second.isStartControl)
-				{
-					result = parent;
-					break;
-				}
-				parent = pit->second.parent;
-			}
-		}
-		return result;
+		return it != m_Elements.end() ? FindStartAncestorLocked(it->second.parent) : 0;
 	}
 
 	static void FreeProperties( PropertyChainSource *sources, unsigned int sourceCount,
