@@ -4,9 +4,6 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - review/tap-win11-arm-probe-20261009
   workflow_dispatch:
 
 jobs:
