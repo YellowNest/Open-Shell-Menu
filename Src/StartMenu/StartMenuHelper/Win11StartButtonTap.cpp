@@ -603,8 +603,17 @@ public:
 
 	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
 	{
-		if (m_StartTree.OnVisualTreeChange(relation, element, mutationType) && m_Advised && m_AllowEnable)
-			RequestApply(g_StartButtonActive && g_StartButtonEnabled);
+		// std::vector, CString and unordered_map may allocate. Never let
+		// a C++ exception unwind through a COM callback in Explorer.
+		try
+		{
+			if (m_StartTree.OnVisualTreeChange(relation, element, mutationType) && m_Advised && m_AllowEnable)
+				RequestApply(g_StartButtonActive && g_StartButtonEnabled);
+		}
+		catch (...)
+		{
+			m_AllowEnable = false;
+		}
 		return S_OK;
 	}
 
@@ -848,6 +857,19 @@ private:
 		}
 	}
 
+	LRESULT ApplyTreeSafely( bool enabled )
+	{
+		try
+		{
+			return static_cast<LRESULT>(m_StartTree.ApplyState(enabled));
+		}
+		catch (...)
+		{
+			m_AllowEnable = false;
+			return static_cast<LRESULT>(E_FAIL);
+		}
+	}
+
 	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 	{
 		CXamlDiagnosticsTap *tap = (CXamlDiagnosticsTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
@@ -875,7 +897,7 @@ private:
 		if (msg == WM_OS_STARTBUTTON_RESTORE && tap)
 		{
 			DrainApplyMessages(hwnd);
-			return static_cast<LRESULT>(tap->m_StartTree.ApplyState(false));
+			return tap->ApplyTreeSafely(false);
 		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
@@ -884,7 +906,7 @@ private:
 			if (!tap->m_AllowEnable)
 				return S_OK;
 			bool enabled = wParam != 0 && g_StartButtonActive && g_StartButtonEnabled;
-			return static_cast<LRESULT>(tap->m_StartTree.ApplyState(enabled));
+			return tap->ApplyTreeSafely(enabled);
 		}
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
