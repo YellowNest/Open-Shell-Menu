@@ -44,6 +44,8 @@ jobs:
           grep -Fq "NOSTART=1" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "ExplorerPidContinuity" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "LogStartup" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "INTERACTIVE_DESKTOP_VERIFIED" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "WWAHost" "$ROOT/oem/win11_native_x64_stress.ps1"
           echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
 
       - name: Fetch raw v7 installer with compatible v8 download action
@@ -140,6 +142,8 @@ jobs:
           assert integration=='FOUR_X64_LIFECYCLE_CYCLES_AND_XAML_CONNECTION_VERIFIED', integration
           assert result.get('InstallerExit') in (0,3010),result
           cases=result.get('Cycles',[])
+          assert result.get('DesktopGateStableSamples',0)>=3,result
+          assert result.get('DesktopGateHitRootProcess') not in ('WWAHost','LogonUI','CloudExperienceHostBroker','FirstLogonAnim'),result
           assert len(cases)==4,cases
           assert all(x.get('Passed') is True and x.get('MenuStopped') is True and x.get('ExplorerAfterStop') is True and x.get('ExplorerPidContinuity') is True for x in cases),cases
           assert sum(x.get('EnableStartButton')==1 for x in cases)==3,cases
