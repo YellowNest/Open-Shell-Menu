@@ -1,0 +1,32 @@
+name: Probe native x64 Windows 11 VM feasibility
+permissions:
+  contents: read
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-x64-kvm-probe.yml'
+jobs:
+  feasibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check virtualization and storage without installing or downloading Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CPU_ARCH=$(uname -m)"
+          echo "CPU_MODEL=$(grep -m 1 'model name' /proc/cpuinfo || true)"
+          echo "CPU_VIRTUALIZATION_FLAGS=$(grep -Eom1 'vmx|svm' /proc/cpuinfo || true)"
+          echo "KVM_DEVICE=$(test -c /dev/kvm && echo yes || echo no)"
+          if test -c /dev/kvm; then
+            ls -l /dev/kvm
+            if test -r /dev/kvm && test -w /dev/kvm; then echo "KVM_ACCESS=yes"; else echo "KVM_ACCESS=no"; fi
+          fi
+          echo "TUN_DEVICE=$(test -c /dev/net/tun && echo yes || echo no)"
+          echo "=== DISK ==="
+          df -h / /mnt /tmp || true
+          echo "=== MEMORY ==="
+          free -h
+          echo "=== KVM PROBE COMPLETE ==="
