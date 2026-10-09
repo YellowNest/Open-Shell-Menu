@@ -45,6 +45,8 @@ public static class ShellProbe {
     ExplorerRunning=($explorer.Count -gt 0)
     TaskbarDetected=($taskbar -ne [IntPtr]::Zero)
   }
+  $r['Stage']='EXPLORER_PROVEN'
+  $r['Terminal']=$false
   Publish $r
   if (-not $r.NativeWindows11X64 -or -not $r.ExplorerRunning) { exit 3 }
   $installers=@('Z:\OpenShellSetup_4_4_202.exe','\\host.lan\Shared\OpenShellSetup_4_4_202.exe')
@@ -54,30 +56,69 @@ public static class ShellProbe {
     Publish $r
     exit 0
   }
-  $p=Start-Process -FilePath $installer -ArgumentList '/qn REBOOT=ReallySuppress' -Wait -PassThru
+  $localInstaller='C:\\OEM\\OpenShellSetup_4_4_202.exe'
+  $r['Stage']='COPYING_INSTALLER'
+  Publish $r
+  Copy-Item -LiteralPath $installer -Destination $localInstaller -Force -ErrorAction Stop
+  $hash=(Get-FileHash -LiteralPath $localInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+  $r['InstallerSHA256']=$hash
+  if($hash -ne '10f976b90127f6d7a402a9934949de50eeffa71f6687133f9f88b5b23692882f') { throw 'Installer SHA256 mismatch inside Windows guest' }
+  $r['Stage']='INSTALLER_STARTING'
+  Publish $r
+  $p=Start-Process -FilePath $localInstaller -ArgumentList '/qn REBOOT=ReallySuppress /l*v "C:\\OEM\\openshell-msi.log"' -PassThru -ErrorAction Stop
+  $r['InstallerPid']=$p.Id
+  $installerEnded=$false
+  for ($i=0; $i -lt 60; $i++) {
+    if($p.WaitForExit(5000)) { $installerEnded=$true; break }
+    $r['Stage']='INSTALLER_RUNNING'
+    $r['InstallerPoll']=$i+1
+    $r['MSIExecProcessCount']=@(Get-Process msiexec -ErrorAction SilentlyContinue).Count
+    Publish $r
+  }
+  if(-not $installerEnded) {
+    $r['Stage']='INSTALL_TIMEOUT'
+    $r['OpenShellIntegration']='INSTALL_TIMEOUT'
+    $r['Terminal']=$true
+    Publish $r
+    exit 7
+  }
+  $r['Stage']='INSTALLER_FINISHED'
   $r['InstallerExit']=$p.ExitCode
+  Publish $r
   if ($p.ExitCode -notin @(0,3010)) {
     $r['OpenShellIntegration']='INSTALL_FAILED'
     Publish $r
     exit 4
   }
+  $r['Stage']='CHECKING_INSTALLED_EXE'
+  Publish $r
   $exe=Join-Path $env:ProgramFiles 'Open-Shell\StartMenu.exe'
   if (-not (Test-Path $exe)) {
     $r['OpenShellIntegration']='STARTMENU_NOT_INSTALLED'
     Publish $r
     exit 5
   }
+  $r['Stage']='STARTING_OPEN_SHELL'
+  Publish $r
   Start-Process -FilePath $exe
   Start-Sleep -Seconds 15
   $r['StartMenuRunning'] = (@(Get-Process StartMenu -ErrorAction SilentlyContinue).Count -gt 0)
   $r['ExplorerAliveAfterStart'] = (@(Get-Process explorer -ErrorAction SilentlyContinue).Count -gt 0)
-  Start-Process -FilePath $exe -ArgumentList '-exit' -Wait
+  $r['Stage']='STOPPING_OPEN_SHELL'
+  Publish $r
+  $exitProcess=Start-Process -FilePath $exe -ArgumentList '-exit' -PassThru
+  if(-not $exitProcess.WaitForExit(30000)) { throw 'StartMenu -exit exceeded 30 seconds' }
   Start-Sleep -Seconds 8
   $r['ExplorerAliveAfterStop'] = (@(Get-Process explorer -ErrorAction SilentlyContinue).Count -gt 0)
   $r['OpenShellIntegration']='START_STOP_EXECUTED_NOT_XAML_VISUALLY_VERIFIED'
+  $r['Stage']='TEST_COMPLETE'
+  $r['Terminal']=$true
   Publish $r
 } catch {
-  $e=[ordered]@{Stage='UNHANDLED_TEST_ERROR';Error=$_.Exception.ToString()}
-  Publish $e
+  $r['Stage']='TEST_ERROR'
+  $r['Terminal']=$true
+  $r['OpenShellIntegration']='TEST_ERROR'
+  $r['Failure']=$_.Exception.ToString()
+  Publish $r
   exit 6
 }
