@@ -18,28 +18,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: review/tap-win11-arm-probe-20261009
-      - name: Parse guest automation using real Windows PowerShell 5.1 and PowerShell 7
+      - name: Parse guest script with Windows PowerShell 5.1 and PowerShell 7
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $source = [IO.File]::ReadAllText((Join-Path $PWD '.github/tap-tests/win11_native_x64_stress.ps1'))
-          foreach($exe in @('powershell.exe','pwsh.exe')) {
-            Write-Host "VALIDATE: $exe"
-            & $exe -NoProfile -NonInteractive -Command @'
+          $path=(Resolve-Path '.github/tap-tests/win11_native_x64_stress.ps1').Path
           $tokens=$null;$errors=$null
-          [System.Management.Automation.Language.Parser]::ParseInput(
-              [Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null
-          if($errors.Count -gt 0) {
-             $errors|ForEach-Object { Write-Host $_.ToString() }
-             exit 1
-          }
-          Write-Host 'PASS: syntax is valid'
-          '@ 2>&1 | Write-Host
-          }
-          $tokens=$null;$errors=$null
-          [System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)|Out-Null
-          if($errors.Count -gt 0) {
+          [System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)|Out-Null
+          if($errors.Count -ne 0) {
             $errors|ForEach-Object {Write-Host $_.ToString()}
-            throw "Syntax errors: $($errors.Count)"
+            throw "PS7 parser errors: $($errors.Count)"
           }
-          Write-Host 'PASS: guest test PowerShell AST'
+          Write-Host 'PASS: PowerShell 7 guest stress test parsing'
+          $testScript = '$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e)|Out-Null;if($e.Count -gt 0){$e|ForEach-Object {Write-Host $_.ToString()};exit 1}else{Write-Host "PASS: Windows PowerShell 5.1 parsing"}'
+          & powershell.exe -NoProfile -NonInteractive -Command $testScript $path
+          if($LASTEXITCODE -ne 0) {throw "Windows PowerShell 5.1 parser failed: $LASTEXITCODE"}
