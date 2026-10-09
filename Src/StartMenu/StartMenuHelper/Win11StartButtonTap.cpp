@@ -704,6 +704,12 @@ private:
 			m_Advised = false;
 		}
 
+		// Dispose of the window while the TAP is still strongly referenced.
+		// Otherwise a cross-thread destroy message could enter a dying object.
+		hr = DestroyDispatchWindow();
+		if (FAILED(hr))
+			return hr;
+
 		m_StartTree.ResetElements();
 		m_StartTree.SetVisual(NULL);
 		m_Visual.Release();
