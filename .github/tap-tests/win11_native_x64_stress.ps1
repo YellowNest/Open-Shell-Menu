@@ -195,6 +195,21 @@ public static class ShellProbe {
 } catch {
   $state['Failure']=$_.Exception.ToString()
   $state['OpenShellIntegration']='FAILED_WITH_DETAIL'
+  $state['ExplorerPIDsAtFailure']=@((ProcessList 'explorer')|ForEach-Object Id)
+  $state['StartMenuPIDsAtFailure']=@((ProcessList 'StartMenu')|ForEach-Object Id)
+  foreach($item in @(
+    @{Local='C:\OEM\openshell-msi.log';Remote='openshell-msi.log'},
+    @{Local=(Join-Path $env:LOCALAPPDATA 'OpenShell\StartupLog.txt');Remote='openshell-startup.txt'}
+  )) {
+    if(Test-Path $item.Local){
+      try {
+        $state[($item.Remote+'Tail')]=@(Get-Content -Path $item.Local -Tail 35 -ErrorAction Stop)
+        foreach($root in @('Z:\','\\host.lan\Shared\')){
+          try{Copy-Item -LiteralPath $item.Local -Destination ($root+$item.Remote) -Force -ErrorAction Stop;break}catch{}
+        }
+      } catch{$state['DiagnosticCopyError']=$_.Exception.Message}
+    }
+  }
   Publish 'TEST_FAILED' $true
   exit 1
 }
