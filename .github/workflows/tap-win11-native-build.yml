@@ -19,7 +19,7 @@ jobs:
       - name: Checkout hardened code, not upstream PR
         uses: actions/checkout@v4
         with:
-          ref: review/tap-lifetime-hardened-clean-20261009
+          ref: review/tap-win11-arm-probe-20261009
           fetch-depth: 0
       - name: Confirm toolchain and compile native ARM64 code
         shell: pwsh
@@ -39,3 +39,28 @@ jobs:
           Write-Host 'ARM64 solution build succeeded with VS2026 v145 toolset inside actual Windows 11'
           Get-ChildItem -Path . -Recurse -File -Include 'StartMenu.exe','StartMenuDLL.dll','StartMenuHelper64.dll' -ErrorAction SilentlyContinue |
             Select-Object -First 35 -ExpandProperty FullName | ForEach-Object { Write-Host "BUILT: $_" }
+      - name: Confirm test branch production source matches hardened branch
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin review/tap-lifetime-hardened-clean-20261009
+          git diff --exit-code 'origin/review/tap-lifetime-hardened-clean-20261009' HEAD -- 'Src/StartMenu/StartMenuHelper/Win11StartButtonTap.cpp' 'Src/StartMenu/StartMenuDLL/StartMenuDLL.cpp'
+          if ($LASTEXITCODE -ne 0) { throw 'Test branch production C++ differs from hardened clean branch' }
+
+      - name: Stress COM factory, dispatch HWND lifetime and unload on Windows 11
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsdir = (& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          $devcmd = Join-Path $vsdir 'Common7\Tools\VsDevCmd.bat'
+          $harness = Join-Path $env:RUNNER_TEMP 'tap_com_smoke.exe'
+          $script = '.github\tap-tests\tap_com_smoke.cpp'
+          if (-not (Test-Path $devcmd) -or -not (Test-Path $script)) { throw 'Harness or developer environment missing' }
+          $command = 'call "' + $devcmd + '" -arch=arm64 -host_arch=arm64 >nul && cl.exe /nologo /EHsc /W4 /std:c++17 "' + $script + '" /Fe:"' + $harness + '" /link ole32.lib user32.lib'
+          & cmd.exe /d /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Native C++ harness compile failed: $LASTEXITCODE" }
+          $dll = Join-Path $PWD 'build\bin\SetupARM64\StartMenuHelper64.dll'
+          if (-not (Test-Path $dll)) { throw "Compiled helper DLL missing: $dll" }
+          & $harness $dll
+          if ($LASTEXITCODE -ne 0) { throw "Real Windows 11 COM lifecycle test failed: $LASTEXITCODE" }
+          Write-Host 'Native Windows 11 COM lifetime stress test passed'
