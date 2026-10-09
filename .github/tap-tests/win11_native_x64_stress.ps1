@@ -90,14 +90,60 @@ try {
   Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)] public struct TAP_RECT { public int Left,Top,Right,Bottom; }
+[StructLayout(LayoutKind.Sequential)] public struct TAP_POINT { public int X,Y; }
 public static class ShellProbe {
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr FindWindow(string c,string t);
  [DllImport("user32.dll")]public static extern IntPtr GetShellWindow();
+ [DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr hwnd,out TAP_RECT rect);
+ [DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll")]public static extern IntPtr WindowFromPoint(TAP_POINT point);
+ [DllImport("user32.dll")]public static extern IntPtr GetAncestor(IntPtr hwnd,uint flags);
+ [DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
 }
 '@
   $bar=[ShellProbe]::FindWindow('Shell_TrayWnd',$null)
   Check ($bar -ne [IntPtr]::Zero) 'Taskbar unavailable'
   $state['TaskbarDetected']=$true;$state['NativeWindows11X64']=$true
+  # Explorer can start while first-sign-in/OOBE still covers the entire desktop.
+  # Only proceed once the taskbar is physically visible and WWAHost is no longer
+  # the fullscreen hit-test owner. Observe stability across two samples.
+  $stable=0
+  for($gate=0;$gate -lt 65;$gate++){
+    $rect=New-Object TAP_RECT
+    $rectOK=[ShellProbe]::GetWindowRect($bar,[ref]$rect)
+    $visible=[ShellProbe]::IsWindowVisible($bar)
+    $owner='UNKNOWN'
+    $foregroundHandle=[IntPtr]::Zero
+    if($rectOK -and $rect.Right -gt $rect.Left -and $rect.Bottom -gt $rect.Top){
+      $pt=New-Object TAP_POINT
+      $pt.X=[int](($rect.Left+$rect.Right)/2)
+      $pt.Y=[int](($rect.Top+$rect.Bottom)/2)
+      $hit=[ShellProbe]::WindowFromPoint($pt)
+      $foregroundHandle=[ShellProbe]::GetAncestor($hit,2)
+      $hitPid=[uint32]0
+      if($foregroundHandle -ne [IntPtr]::Zero){
+        $discard=[ShellProbe]::GetWindowThreadProcessId($foregroundHandle,[ref]$hitPid)
+        try{$owner=(Get-Process -Id $hitPid -ErrorAction Stop).ProcessName}catch{}
+      }
+    }
+    $state['DesktopGatePoll']=$gate+1
+    $state['DesktopGateTaskbarVisible']=$visible
+    $state['DesktopGateHitRootProcess']=$owner
+    $state['DesktopGateHitRootHWND']=[string]$foregroundHandle
+    $state['DesktopGateTaskbarRect']=@{Top=$rect.Top;Bottom=$rect.Bottom;Left=$rect.Left;Right=$rect.Right}
+    $state['DesktopGateStableSamples']=$stable
+    Publish 'WAITING_FOR_REAL_EXPLORER_DESKTOP'
+    $oobe= $owner -in @('WWAHost','LogonUI','CloudExperienceHostBroker','FirstLogonAnim')
+    if($visible -and $rectOK -and -not $oobe -and $owner -ne 'UNKNOWN'){
+      $stable++
+      if($stable -ge 3){break}
+    }else{$stable=0}
+    Start-Sleep -Seconds 5
+  }
+  $state['DesktopGateStableSamples']=$stable
+  Check ($stable -ge 3) ('First-login/OOBE overlay never cleared; last taskbar hit owner='+$state['DesktopGateHitRootProcess'])
+  Publish 'INTERACTIVE_DESKTOP_VERIFIED'
   $state['BaselineStartUIA']=UIAStart
   Screenshot 'tap-baseline'
   Publish 'NATIVE_EXPLORER_BASELINE'
