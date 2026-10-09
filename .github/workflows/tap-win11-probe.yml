@@ -1,0 +1,75 @@
+name: Windows 11 TAP runtime environment probe
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Identify Windows 11 runtime and interactive Explorer shell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $os = Get-CimInstance Win32_OperatingSystem
+          $process = Get-Process -Id $PID
+          $explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
+          $dwm = @(Get-Process -Name dwm -ErrorAction SilentlyContinue)
+          $reg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class ShellProbe
+          {
+              [DllImport("user32.dll", SetLastError = true)]
+              public static extern IntPtr GetShellWindow();
+              [DllImport("user32.dll", SetLastError = true)]
+              public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+              [DllImport("user32.dll", SetLastError = true)]
+              public static extern bool CloseDesktop(IntPtr desktop);
+          }
+          '@
+          $shellHwnd = [ShellProbe]::GetShellWindow()
+          $inputDesktop = [ShellProbe]::OpenInputDesktop(0, $false, 0x100)
+          $hasDesktop = $inputDesktop -ne [IntPtr]::Zero
+          if ($hasDesktop) { [void][ShellProbe]::CloseDesktop($inputDesktop) }
+          $record = [ordered]@{
+            Caption = $os.Caption
+            BuildNumber = $os.BuildNumber
+            Edition = $reg.EditionID
+            OSArchitecture = $os.OSArchitecture
+            ProcessArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            CurrentSessionId = $process.SessionId
+            UserInteractive = [Environment]::UserInteractive
+            ShellWindowHandle = [string]$shellHwnd
+            InputDesktopAvailable = $hasDesktop
+            ExplorerProcesses = @($explorer | ForEach-Object { [ordered]@{ Id=$_.Id; SessionId=$_.SessionId } })
+            DwmProcesses = @($dwm | ForEach-Object { [ordered]@{ Id=$_.Id; SessionId=$_.SessionId } })
+            XamlRuntimeDll = Test-Path (Join-Path $env:SystemRoot 'System32\Windows.UI.Xaml.dll')
+            WindowsTaskbarDll = Test-Path (Join-Path $env:SystemRoot 'System32\Taskbar.dll')
+            RunnerOS = $env:RUNNER_OS
+            RunnerArchitecture = $env:RUNNER_ARCH
+          }
+          $record | ConvertTo-Json -Depth 6 | Set-Content -Path win11-probe.json -Encoding utf8
+          $record | ConvertTo-Json -Depth 6 | Write-Host
+          if ($os.Caption -notmatch 'Windows 11') {
+            throw 'The runner is not Windows 11: this is not a Windows 11 runtime test.'
+          }
+          if (-not $hasDesktop -or $shellHwnd -eq [IntPtr]::Zero) {
+            Write-Warning 'No interactive Explorer desktop. This VM can validate Windows 11 APIs but NOT Start button visual behavior.'
+          }
+      - name: Preserve environment evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows11-explorer-environment-probe
+          path: win11-probe.json
+          if-no-files-found: warn
+          retention-days: 7
