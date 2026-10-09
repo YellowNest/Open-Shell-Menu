@@ -21,7 +21,6 @@
 #include <atomic>
 #include <mutex>
 #include <new>
-#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -61,7 +60,7 @@ struct StartElement
 
 class CXamlDiagnosticsTap;
 static CComPtr<CXamlDiagnosticsTap> g_Tap;
-static std::shared_mutex g_TapMutex;
+static std::mutex g_TapMutex;
 
 static bool ContainsText( const CString &text, const wchar_t *part )
 {
@@ -867,7 +866,7 @@ private:
 
 static CComPtr<CXamlDiagnosticsTap> GetTapRef( void )
 {
-	std::shared_lock lock(g_TapMutex);
+	std::lock_guard lock(g_TapMutex);
 	return g_Tap;
 }
 
