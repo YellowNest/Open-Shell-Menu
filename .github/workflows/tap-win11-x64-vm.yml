@@ -77,17 +77,26 @@ jobs:
             dockurr/windows:latest
           echo 'NATIVE_X64_VM_CONTAINER_STARTED'
           found=0
-          for n in $(seq 1 184); do
+          last_stage="NONE"
+          for n in $(seq 1 136); do
             if test -s "$ROOT/shared/win11-native-x64-proof.json"; then
-              stage=$(python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+              state=$(python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
           import json,sys
           try:
-              with open(sys.argv[1], encoding='utf-8-sig') as f: j=json.load(f)
-              print(j.get('OpenShellIntegration') or j.get('Stage') or 'BOOTSTRAP')
-          except (OSError,ValueError): print('BOOTSTRAP')
+              with open(sys.argv[1],encoding='utf-8-sig') as f: j=json.load(f)
+              stage=j.get('Stage','UNKNOWN')
+              done=str(j.get('Terminal') is True).lower()
+              print(stage+'|'+done)
+          except (OSError,ValueError): print('INCOMPLETE|false')
           PY
               )
-              if test "$stage" != BOOTSTRAP; then
+              stage="$(printf '%s' "$state" | cut -d'|' -f1)"
+              terminal="$(printf '%s' "$state" | cut -d'|' -f2)"
+              if test "$stage" != "$last_stage"; then
+                echo "GUEST_STAGE=$stage TERMINAL=$terminal"
+                last_stage="$stage"
+              fi
+              if test "$terminal" = true; then
                 cp "$ROOT/shared/win11-native-x64-proof.json" "$ROOT/evidence/"
                 echo "GUEST_FINAL_STAGE=$stage"
                 cat "$ROOT/shared/win11-native-x64-proof.json"
@@ -100,14 +109,14 @@ jobs:
               break
             fi
             if (( n % 8 == 0 )); then
-              echo "VM_POLL=$n"
+              echo "VM_POLL=$n GUEST_STAGE=$last_stage"
               sudo docker logs --tail 12 openshell-win11-native-x64 2>&1 || true
               df -h "$ROOT"
             fi
             sleep 15
           done
           if test "$found" -eq 0; then
-            echo 'NO_WINDOWS_GUEST_REPORT'
+            echo "NO_FINAL_GUEST_REPORT LAST_STAGE=$last_stage"
             exit 3
           fi
           python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
@@ -122,6 +131,8 @@ jobs:
           print('Taskbar:', result.get('TaskbarDetected'))
           print('Explorer session(s):', [p['SessionId'] for p in result.get('ExplorerProcesses',[])])
           print('Probe session:', result.get('CurrentSessionId'))
+          assert result.get('Terminal') is True, result
+          assert result.get('Stage') == 'TEST_COMPLETE', result
           integration=result.get('OpenShellIntegration')
           assert integration=='START_STOP_EXECUTED_NOT_XAML_VISUALLY_VERIFIED', integration
           assert result.get('InstallerExit') in (0,3010),result
