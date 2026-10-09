@@ -1,0 +1,38 @@
+name: Verify native Windows 11 x64 taskbar restoration screenshots
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-taskbar-visual.yml'
+      - '.github/tap-tests/check_win11_taskbar_evidence.py'
+  workflow_dispatch:
+
+jobs:
+  rendered-taskbar-evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: review/tap-win11-arm-probe-20261009
+      - name: Retrieve real native x64 Windows 11 evidence from the four cycles
+        uses: actions/download-artifact@v8
+        with:
+          name: native-win11-x64-real-explorer-evidence
+          run-id: 37986096648
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/evidence
+      - name: Validate screenshots and Windows guest report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/visual-venv"
+          "$RUNNER_TEMP/visual-venv/bin/python" -m pip install --quiet Pillow==11.3.0
+          "$RUNNER_TEMP/visual-venv/bin/python" .github/tap-tests/check_win11_taskbar_evidence.py "$RUNNER_TEMP/evidence"
+          echo "PASS: four native Windows 11 x64 taskbar pixel regressions verified from saved guest screenshots"
