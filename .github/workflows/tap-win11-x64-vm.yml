@@ -10,6 +10,8 @@ on:
       - review/tap-win11-arm-probe-20261009
     paths:
       - '.github/workflows/tap-win11-x64-vm.yml'
+      - '.github/tap-tests/win11_native_x64_stress.ps1'
+      - '.github/tap-tests/install.bat'
 
 jobs:
   native-win11-x64:
@@ -45,6 +47,8 @@ jobs:
           grep -Fq "ExplorerPidContinuity" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "LogStartup" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "INTERACTIVE_DESKTOP_VERIFIED" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "CRASH_AUDIT_RUNNING" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "XAML_CONNECTION_AND_LOGS_VERIFIED" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "WWAHost" "$ROOT/oem/win11_native_x64_stress.ps1"
           echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
 
