@@ -1,0 +1,41 @@
+name: Build TAP natively on interactive Windows 11 ARM64
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-native-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build-on-windows11:
+    runs-on: windows-11-arm
+    timeout-minutes: 35
+    steps:
+      - name: Checkout hardened code, not upstream PR
+        uses: actions/checkout@v4
+        with:
+          ref: review/tap-lifetime-hardened-clean-20261009
+          fetch-depth: 0
+      - name: Confirm toolchain and compile native ARM64 code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw 'vswhere not installed on Windows 11 ARM64 runner' }
+          $vsdir = (& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          if (-not $vsdir) { throw 'MSBuild-capable Visual Studio not found' }
+          $msbuild = Join-Path $vsdir 'MSBuild\Current\Bin\MSBuild.exe'
+          if (-not (Test-Path $msbuild)) { throw "Missing MSBuild: $msbuild" }
+          Write-Host "Visual Studio: $vsdir"
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Restore' '/p:RestorePackagesConfig=true' '/verbosity:minimal' '/nologo'
+          if ($LASTEXITCODE -ne 0) { throw "NuGet restore failed: $LASTEXITCODE" }
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Rebuild' '/p:Configuration=Setup' '/p:Platform=ARM64' '/verbosity:minimal' '/nologo'
+          if ($LASTEXITCODE -ne 0) { throw "Native ARM64 build failed: $LASTEXITCODE" }
+          Write-Host 'ARM64 solution build succeeded inside actual Windows 11'
+          Get-ChildItem -Path . -Recurse -File -Include 'StartMenu.exe','StartMenuDLL.dll','StartMenuHelper64.dll' -ErrorAction SilentlyContinue |
+            Select-Object -First 35 -ExpandProperty FullName | ForEach-Object { Write-Host "BUILT: $_" }
