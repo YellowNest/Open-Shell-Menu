@@ -29,6 +29,7 @@ static const GUID CLSID_OpenShellStartButtonTap =
 
 static const UINT WM_OS_STARTBUTTON_APPLY = WM_APP + 0x35B;
 static const UINT WM_OS_STARTBUTTON_DESTROY = WM_APP + 0x35C;
+static const UINT WM_OS_STARTBUTTON_RESTORE = WM_APP + 0x35D;
 static const wchar_t DISPATCH_WINDOW_CLASS[] = L"OpenShell.Win11StartButtonTap";
 static std::mutex g_DispatchClassMutex;
 
@@ -58,7 +59,7 @@ struct StartElement
 };
 
 class CWin11StartButtonTap;
-static CComPtr<CWin11StartButtonTap> &PublishedTap( void );
+static CComPtr<CWin11StartButtonTap> g_Tap;
 static std::shared_mutex g_TapMutex;
 
 static bool ContainsText( const CString &text, const wchar_t *part )
@@ -132,72 +133,51 @@ public:
 
 	STDMETHODIMP SetSite( IUnknown *site )
 	{
-		std::lock_guard lifecycleLock(m_LifecycleMutex);
-
-		// A diagnostics endpoint can call SetSite again on the same TAP object.
-		// Tear down the previous subscription first so callbacks never outlive
-		// the site/service state they were registered against.
-		HRESULT hr = DeactivateLocked();
-		if (FAILED(hr))
-			return hr;
-
-		CComPtr<CWin11StartButtonTap> oldTap;
-		{
-			std::unique_lock lock(g_TapMutex);
-			if (PublishedTap().p == this)
-				oldTap.Attach(PublishedTap().Detach());
-		}
-
+		// A diagnostics TAP has a single site. Exit unregisters its callback,
+		// rather than trying to re-site the existing instance.
 		if (!site)
-		{
-			g_ConnectStarted = false;
 			return S_OK;
-		}
 
-		CComPtr<IVisualTreeService> newVisual;
-		hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&newVisual);
+		std::lock_guard lifecycleLock(m_LifecycleMutex);
+		if (m_Site)
+			return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+
+		CComPtr<IVisualTreeService> visual;
+		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&visual);
 		if (FAILED(hr))
 			return hr;
-		if (!newVisual)
+		if (!visual)
 			return E_NOINTERFACE;
 
-		m_Site = site;
-		m_Visual = newVisual;
-
-		// A published TAP owns a COM reference until it is deactivated.
-		CComPtr<CWin11StartButtonTap> replacedTap;
+		CComPtr<CWin11StartButtonTap> previous;
 		bool active;
 		{
 			std::unique_lock lock(g_TapMutex);
 			active = g_StartButtonActive;
 			if (active)
 			{
-				replacedTap.Attach(PublishedTap().Detach());
-				PublishedTap() = this;
+				m_Site = site;
+				m_Visual = visual;
+				previous.Attach(g_Tap.Detach());
+				g_Tap = this;
 			}
 			else
 				g_ConnectStarted = false;
 		}
 		if (!active)
-		{
-			m_Visual.Release();
-			m_Site.Release();
 			return S_OK;
-		}
 
 		hr = ActivateLocked();
 		if (FAILED(hr))
 		{
-			// A failed activation without a subscription cannot retain a
-			// non-owning global TAP pointer. A failed unadvise, however, must
-			// retain the subscribed callback so activation can be retried.
+			// Preserve the callback when an unsuccessful rollback leaves it advised.
 			if (!m_Advised)
 			{
-				CComPtr<CWin11StartButtonTap> releasedTap;
+				CComPtr<CWin11StartButtonTap> released;
 				{
 					std::unique_lock lock(g_TapMutex);
-					if (PublishedTap().p == this)
-						releasedTap.Attach(PublishedTap().Detach());
+					if (g_Tap.p == this)
+						released.Attach(g_Tap.Detach());
 					g_ConnectStarted = false;
 				}
 			}
@@ -268,7 +248,7 @@ public:
 		// queue partial-state work during that replay; ActivateLocked performs one
 		// complete apply after Advise has returned and the dispatch window exists.
 		if (interesting && m_Advised)
-			RequestApply(false, g_StartButtonActive && g_StartButtonEnabled);
+			RequestApply(g_StartButtonActive && g_StartButtonEnabled);
 		return S_OK;
 	}
 
@@ -293,9 +273,9 @@ public:
 			if (SUCCEEDED(hr))
 			{
 				std::unique_lock tapLock(g_TapMutex);
-				if (!g_StartButtonActive && PublishedTap().p == this)
+				if (!g_StartButtonActive && g_Tap.p == this)
 				{
-					releasedTap.Attach(PublishedTap().Detach());
+					releasedTap.Attach(g_Tap.Detach());
 					g_ConnectStarted = false;
 				}
 			}
@@ -323,23 +303,30 @@ private:
 		return false;
 	}
 
-	HRESULT RequestApply( bool synchronous, bool enabled )
+	// Only teardown needs synchronous delivery; ordinary updates just post work.
+	HRESULT RequestApply( bool enabled )
 	{
 		HWND dispatch = m_Dispatch;
-		if (!dispatch || !IsWindow(dispatch))
+		if (!dispatch)
 			return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
-
-		if (synchronous)
-		{
-			DWORD_PTR result = 0;
-			if (!SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_APPLY, enabled ? 1 : 0, 0,
-				SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result))
-				return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-			return static_cast<HRESULT>(result);
-		}
-
 		return PostMessage(dispatch, WM_OS_STARTBUTTON_APPLY, enabled ? 1 : 0, 0)
 			? S_OK : HRESULT_FROM_WIN32(GetLastError());
+	}
+
+	HRESULT RestoreOnDispatch( void )
+	{
+		HWND dispatch = m_Dispatch;
+		if (!dispatch)
+			return HasOverrides() ? HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE) : S_OK;
+
+		DWORD_PTR result = 0;
+		if (!SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_RESTORE, 0, 0,
+			SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result))
+		{
+			DWORD error = GetLastError();
+			return HRESULT_FROM_WIN32(error ? error : ERROR_TIMEOUT);
+		}
+		return static_cast<HRESULT>(result);
 	}
 
 	HRESULT ActivateLocked( void )
@@ -387,44 +374,24 @@ private:
 		}
 
 		m_AllowEnable = true;
-		return RequestApply(false, g_StartButtonActive && g_StartButtonEnabled);
+		return RequestApply(g_StartButtonActive && g_StartButtonEnabled);
 	}
 
 	HRESULT DeactivateLocked( void )
 	{
-		// Reject any already-queued enable work before restoring state. This is
-		// independent of the global active flag so SetSite replacement is safe
-		// even while Open-Shell itself remains active.
+		// First reject queued enable work. The dispatch thread drains queued
+		// messages and restores native properties before we unsubscribe.
 		m_AllowEnable = false;
-
-		// Restore our XAML overrides before removing the callback. If the UI
-		// thread is unavailable, keep the subscription alive rather than leave
-		// the native Start button hidden with no path left to restore it.
-		HWND dispatch = m_Dispatch;
-		if (dispatch && IsWindow(dispatch))
-		{
-			HRESULT hr = RequestApply(true, false);
-			if (FAILED(hr))
-			{
-				LogToFile(STARTUP_LOG,
-					L"Win11StartButtonTap: synchronous restore failed 0x%08X", hr);
-				return hr;
-			}
-		}
-		else if (HasOverrides())
-		{
-			// Do not discard bookkeeping for live overrides if the UI dispatch
-			// path vanished. Keeping the subscription/state is safer than
-			// leaving a native Start property overridden with no retry path.
-			return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
-		}
-
-		// Unadvise may release the final XAML callback reference.
-		// The dispatch window must be gone before that can happen.
-		HRESULT hr = DestroyDispatchWindow();
+		HRESULT hr = RestoreOnDispatch();
 		if (FAILED(hr))
+		{
+			LogToFile(STARTUP_LOG,
+				L"Win11StartButtonTap: synchronous restore failed 0x%08X", hr);
 			return hr;
+		}
 
+		// The callback must remain valid until Unadvise completes. The idle
+		// dispatch window is destroyed by the TAP destructor.
 		if (m_Visual && m_Advised)
 		{
 			hr = m_Visual->UnadviseVisualTreeChange(
@@ -553,6 +520,11 @@ private:
 		}
 		if (msg == WM_OS_STARTBUTTON_DESTROY && tap)
 			return static_cast<LRESULT>(tap->DestroyDispatchWindow());
+		if (msg == WM_OS_STARTBUTTON_RESTORE && tap)
+		{
+			DrainApplyMessages(hwnd);
+			return static_cast<LRESULT>(tap->ApplyState(false));
+		}
 		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
 		{
 			// A queued enable request must never re-apply overrides once teardown
@@ -891,16 +863,10 @@ private:
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
-static CComPtr<CWin11StartButtonTap> &PublishedTap( void )
-{
-	static CComPtr<CWin11StartButtonTap> tap;
-	return tap;
-}
-
 static CComPtr<CWin11StartButtonTap> GetTapRef( void )
 {
 	std::shared_lock lock(g_TapMutex);
-	return PublishedTap();
+	return g_Tap;
 }
 
 class CStartButtonTapFactory: public IClassFactory
@@ -1073,7 +1039,7 @@ extern "C" void StopWin11StartButtonTap( void )
 		// Serialize stop with SetSite publishing the global TAP pointer.
 		std::unique_lock lock(g_TapMutex);
 		g_StartButtonActive = false;
-		tap = PublishedTap();
+		tap = g_Tap;
 	}
 	if (tap)
 	{
