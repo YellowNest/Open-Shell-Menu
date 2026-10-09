@@ -41,7 +41,10 @@ jobs:
           mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
           cp .github/tap-tests/install.bat "$ROOT/oem/"
           cp .github/tap-tests/win11_native_x64_stress.ps1 "$ROOT/oem/"
-          echo "Staged guest verification script"
+          grep -Fq "NOSTART=1" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "ExplorerPidContinuity" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "LogStartup" "$ROOT/oem/win11_native_x64_stress.ps1"
+          echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
 
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
@@ -138,13 +141,14 @@ jobs:
           assert result.get('InstallerExit') in (0,3010),result
           cases=result.get('Cycles',[])
           assert len(cases)==4,cases
-          assert all(x.get('Passed') is True and x.get('MenuStopped') is True and x.get('ExplorerAfterStop') is True for x in cases),cases
+          assert all(x.get('Passed') is True and x.get('MenuStopped') is True and x.get('ExplorerAfterStop') is True and x.get('ExplorerPidContinuity') is True for x in cases),cases
           assert sum(x.get('EnableStartButton')==1 for x in cases)==3,cases
           assert all(x.get('HelperLoadedInExplorer') is True for x in cases if x.get('EnableStartButton')==1),cases
           assert len(result.get('XamlConnectedLogLines',[]))>0,result
           assert len(result.get('XamlFailureLogLines',[]))==0,result
           assert len(result.get('CrashOrHangEvents',[]))==0,result
           print('PASS: four real native x64 Explorer/Open-Shell lifecycle cycles with 3 XAML-enabled cases')
+          print('PASS: original Explorer PID survived all four lifecycle cycles')
           print('PASS: helper DLL observed, XAML diagnostics connection reported and no recorded startup/teardown failure')
           print('LIMITATION: UIAutomation and screenshots are observations, NOT proof of precise XAML property restoration')
           PY
