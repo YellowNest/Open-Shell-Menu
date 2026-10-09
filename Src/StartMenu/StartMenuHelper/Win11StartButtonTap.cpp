@@ -823,13 +823,12 @@ private:
 		if (GetWindowThreadProcessId(dispatch, NULL) == GetCurrentThreadId())
 		{
 			DrainApplyMessages(dispatch);
-			SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
+			// WM_NCDESTROY clears GWLP_USERDATA and releases the HWND's
+			// COM reference. Clearing it before DestroyWindow would leak it.
 			if (!DestroyWindow(dispatch))
 			{
 				DWORD error = GetLastError();
-				if (IsWindow(dispatch))
-					SetWindowLongPtr(dispatch, GWLP_USERDATA, (LONG_PTR)this);
-				return HRESULT_FROM_WIN32(error);
+				return HRESULT_FROM_WIN32(error ? error : ERROR_GEN_FAILURE);
 			}
 			m_Dispatch = NULL;
 			std::lock_guard classLock(g_DispatchClassMutex);
