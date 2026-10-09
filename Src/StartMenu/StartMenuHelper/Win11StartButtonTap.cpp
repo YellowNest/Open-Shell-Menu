@@ -523,7 +523,7 @@ public:
 			return Deactivate();
 
 		std::lock_guard lifecycleLock(m_LifecycleMutex);
-		if (m_Site)
+		if (m_SiteAssigned)
 			return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
 
 		CComPtr<IVisualTreeService> visual;
@@ -532,6 +532,7 @@ public:
 			return hr;
 		if (!visual)
 			return E_NOINTERFACE;
+		m_SiteAssigned = true;
 
 		CComPtr<CXamlDiagnosticsTap> previous;
 		bool active;
@@ -848,6 +849,7 @@ private:
 	std::atomic_bool m_AllowEnable{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
 	std::mutex m_LifecycleMutex;
+	bool m_SiteAssigned = false;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
 	CStartButtonTree m_StartTree;
