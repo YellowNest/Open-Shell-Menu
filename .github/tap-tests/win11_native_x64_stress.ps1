@@ -219,6 +219,55 @@ public static class ShellProbe {
     Publish ('CYCLE_'+$i+'_PASSED')
   }
   Publish 'FOUR_LIFECYCLES_COMPLETE'
+  # Compare the rendered Windows 11 taskbar in native x64 screenshots.
+  # The disabled cycle must remain unchanged; each enabled cycle must replace
+  # the native Start glyph and restore the same baseline when stopped.
+  Publish 'VERIFYING_VISUAL_START_BUTTON_RESTORATION'
+  Add-Type -ReferencedAssemblies 'System.Drawing' -TypeDefinition @'
+using System;
+using System.Drawing;
+public static class TAPTaskbarVisualDiff {
+  public static int CountChanged(string aPath, string bPath, int threshold) {
+    using (Bitmap a = new Bitmap(aPath))
+    using (Bitmap b = new Bitmap(bPath)) {
+      if (a.Width != b.Width || a.Height != b.Height)
+        throw new InvalidOperationException("Screenshot dimensions changed");
+      int count = 0;
+      int x0 = a.Width / 5, x1 = a.Width * 4 / 5;
+      int y0 = Math.Max(0, a.Height - 58);
+      for (int y = y0; y < a.Height; ++y) {
+        for (int x = x0; x < x1; ++x) {
+          Color ca = a.GetPixel(x, y), cb = b.GetPixel(x, y);
+          if (Math.Abs(ca.R-cb.R) > threshold ||
+              Math.Abs(ca.G-cb.G) > threshold ||
+              Math.Abs(ca.B-cb.B) > threshold) ++count;
+        }
+      }
+      return count;
+    }
+  }
+}
+'@
+  $baseline='C:\OEM\tap-baseline.png'
+  Check (Test-Path -LiteralPath $baseline) 'Taskbar baseline screenshot missing'
+  foreach($case in $cycles) {
+    $number=$case['Iteration']
+    $active='C:\OEM\tap-cycle-'+$number+'-active.png'
+    $stopped='C:\OEM\tap-cycle-'+$number+'-stopped.png'
+    Check ((Test-Path -LiteralPath $active) -and (Test-Path -LiteralPath $stopped)) ('Missing cycle screenshots '+$number)
+    $activeDiff=[TAPTaskbarVisualDiff]::CountChanged($active,$stopped,25)
+    $restoredDiff=[TAPTaskbarVisualDiff]::CountChanged($baseline,$stopped,25)
+    $case['TaskbarActiveVsStoppedChangedPixels']=$activeDiff
+    $case['TaskbarStoppedVsBaselineChangedPixels']=$restoredDiff
+    Publish ('VISUAL_CYCLE_'+$number+'_MEASURED')
+    if($case['EnableStartButton'] -eq 1) {
+      Check ($activeDiff -ge 350) ('Enabled Start button was not visibly replaced: cycle '+$number)
+    } else {
+      Check ($activeDiff -le 60) ('Disabled cycle unexpectedly changed Start button: cycle '+$number)
+    }
+    Check ($restoredDiff -le 60) ('Taskbar Start glyph did not visually restore after cycle '+$number)
+  }
+  Publish 'VISUAL_START_BUTTON_RESTORATION_PASSED'
   $log=Join-Path $env:LOCALAPPDATA 'OpenShell\StartupLog.txt'
   $state['StartupLogPresent']=(Test-Path -LiteralPath $log)
   Publish 'STARTUP_LOG_LOCATED'
