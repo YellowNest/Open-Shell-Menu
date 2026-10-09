@@ -517,10 +517,10 @@ public:
 
 	STDMETHODIMP SetSite( IUnknown *site )
 	{
-		// A diagnostics TAP has a single site. Exit unregisters its callback,
-		// rather than trying to re-site the existing instance.
+		// NULL clears the site. During Unadvise, the diagnostics framework may
+		// enter SetSite again; the in-progress shutdown already owns cleanup.
 		if (!site)
-			return Deactivate();
+			return m_Deactivating ? S_OK : Deactivate();
 
 		std::lock_guard lifecycleLock(m_LifecycleMutex);
 		if (m_SiteAssigned)
@@ -532,19 +532,20 @@ public:
 			return hr;
 		if (!visual)
 			return E_NOINTERFACE;
-		m_SiteAssigned = true;
 
-		CComPtr<CXamlDiagnosticsTap> previous;
 		bool active;
 		{
 			std::unique_lock lock(g_TapMutex);
 			active = g_StartButtonActive;
+			if (active && g_Tap)
+				return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+
+			m_SiteAssigned = true;
 			if (active)
 			{
 				m_Site = site;
 				m_Visual = visual;
 				m_StartTree.SetVisual(visual);
-				previous.Attach(g_Tap.Detach());
 				g_Tap = this;
 			}
 			else
@@ -556,7 +557,7 @@ public:
 		hr = ActivateLocked();
 		if (FAILED(hr))
 		{
-			// Preserve the callback when an unsuccessful rollback leaves it advised.
+			// Retain any callback that a failed Unadvise could not unregister.
 			if (!m_Advised)
 			{
 				CComPtr<CXamlDiagnosticsTap> released;
@@ -681,12 +682,14 @@ private:
 
 		// First reject queued enable work. The dispatch thread drains queued
 		// messages and restores native properties before we unsubscribe.
+		m_Deactivating = true;
 		m_AllowEnable = false;
 		HRESULT hr = RestoreOnDispatch();
 		if (FAILED(hr))
 		{
 			LogToFile(STARTUP_LOG,
 				L"Win11StartButtonTap: synchronous restore failed 0x%08X", hr);
+			m_Deactivating = false;
 			return hr;
 		}
 
@@ -700,6 +703,7 @@ private:
 			{
 				LogToFile(STARTUP_LOG,
 					L"Win11StartButtonTap: visual tree unadvise failed 0x%08X", hr);
+				m_Deactivating = false;
 				return hr;
 			}
 			m_Advised = false;
@@ -709,12 +713,16 @@ private:
 		// Otherwise a cross-thread destroy message could enter a dying object.
 		hr = DestroyDispatchWindow();
 		if (FAILED(hr))
+		{
+			m_Deactivating = false;
 			return hr;
+		}
 
 		m_StartTree.ResetElements();
 		m_StartTree.SetVisual(NULL);
 		m_Visual.Release();
 		m_Site.Release();
+		m_Deactivating = false;
 		return S_OK;
 	}
 
@@ -847,6 +855,7 @@ private:
 	HRESULT m_DispatchStatus = E_UNEXPECTED;
 	std::atomic_bool m_Advised{ false };
 	std::atomic_bool m_AllowEnable{ false };
+	std::atomic_bool m_Deactivating{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
 	std::mutex m_LifecycleMutex;
 	bool m_SiteAssigned = false;
