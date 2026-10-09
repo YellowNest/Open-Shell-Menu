@@ -93,6 +93,8 @@ public:
 	CWin11StartButtonTap( void )
 	{
 		_AtlModule.Lock();
+		// Each TAP owns exactly one message window for its entire lifetime.
+		m_DispatchStatus = CreateDispatchWindow();
 	}
 
 	~CWin11StartButtonTap( void )
@@ -100,6 +102,8 @@ public:
 		DestroyDispatchWindow();
 		_AtlModule.Unlock();
 	}
+
+	HRESULT DispatchStatus( void ) const { return m_DispatchStatus; }
 
 	STDMETHODIMP QueryInterface( REFIID riid, void **ppv )
 	{
@@ -333,44 +337,23 @@ private:
 	{
 		if (!m_Visual)
 			return E_UNEXPECTED;
+		if (FAILED(m_DispatchStatus))
+			return m_DispatchStatus;
 
 		if (!m_Advised)
 		{
 			ResetElements();
 
-			// Advise replays the existing tree. The replay only records handles;
-			// no property work is queued until m_Advised becomes true below.
-			HRESULT hr = m_Visual->AdviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(this));
+			// Advise replays the existing tree synchronously. Until it returns,
+			// OnVisualTreeChange records elements without scheduling partial work.
+			HRESULT hr = m_Visual->AdviseVisualTreeChange(
+				static_cast<IVisualTreeServiceCallback*>(this));
 			if (FAILED(hr))
 			{
 				ResetElements();
 				return hr;
 			}
 			m_Advised = true;
-		}
-
-		HRESULT hr = CreateDispatchWindow();
-		if (FAILED(hr))
-		{
-			// If the callback was registered by this activation, undo it. If
-			// unadvise itself fails, keep the subscription state intact so a
-			// later activation can retry only the dispatch-window creation.
-			if (m_Visual && m_Advised)
-			{
-				HRESULT unadvise = m_Visual->UnadviseVisualTreeChange(
-					static_cast<IVisualTreeServiceCallback*>(this));
-				if (SUCCEEDED(unadvise))
-				{
-					m_Advised = false;
-					ResetElements();
-				}
-				else
-				{
-					LogToFile(STARTUP_LOG,
-						L"Win11StartButtonTap: rollback unadvise failed 0x%08X", unadvise);
-				}
-			}
-			return hr;
 		}
 
 		m_AllowEnable = true;
@@ -849,6 +832,7 @@ private:
 	}
 
 	std::atomic<ULONG> m_Refs{ 1 };
+	HRESULT m_DispatchStatus = E_UNEXPECTED;
 	std::atomic_bool m_Advised{ false };
 	std::atomic_bool m_AllowEnable{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
@@ -899,6 +883,9 @@ public:
 		tap.Attach(new CWin11StartButtonTap());
 		if (!tap)
 			return E_OUTOFMEMORY;
+		HRESULT hr = tap->DispatchStatus();
+		if (FAILED(hr))
+			return hr;
 		return tap->QueryInterface(riid, ppv);
 	}
 
