@@ -4,6 +4,9 @@ permissions:
   contents: read # Default to secure
 
 on:
+  push:
+    branches:
+      - review/tap-simplification-20261009
   pull_request:
     branches:
       - master
