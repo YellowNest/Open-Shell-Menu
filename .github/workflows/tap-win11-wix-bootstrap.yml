@@ -1,0 +1,24 @@
+name: Windows 11 ARM64 WiX MSI tooling bootstrap
+permissions:
+  contents: read
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-wix-bootstrap.yml'
+jobs:
+  wix-tooling:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Install pinned WiX 3.14 inside ephemeral VM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & choco install wixtoolset --version=3.14.1.20250415 --yes --no-progress --limit-output
+          if ($LASTEXITCODE -notin @(0,3010)) { throw "WiX installation failed: $LASTEXITCODE" }
+          $known = 'C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe'
+          $cmd = Get-ChildItem 'C:\Program Files (x86)' -Recurse -Filter candle.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "WiX3 Candle: $cmd"
+          if (-not $cmd) { throw 'WiX 3.x candle.exe not found after install' }
