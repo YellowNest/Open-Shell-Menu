@@ -218,30 +218,65 @@ public static class ShellProbe {
     $case['Passed']=$true
     Publish ('CYCLE_'+$i+'_PASSED')
   }
+  Publish 'FOUR_LIFECYCLES_COMPLETE'
   $log=Join-Path $env:LOCALAPPDATA 'OpenShell\StartupLog.txt'
-  $state['StartupLogPresent']=(Test-Path $log)
-  if(Test-Path $log) {
-    $lines=@(Get-Content -Path $log -Encoding Unicode)
-    $state['XamlConnectedLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connected using'})
-    $state['XamlFailureLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connection failed|Win11StartButtonTap: deactivate failed|Win11StartButtonTap: synchronous restore failed|Win11StartButtonTap: visual tree unadvise failed'})
-    foreach($remote in @('Z:\','\\host.lan\Shared\')) {
-      try{Copy-Item $log ($remote+'openshell-startup.txt') -Force -ErrorAction Stop;break}catch{}
-    }
-  }
-  Publish 'CHECKING_XAML_LOGS'
+  $state['StartupLogPresent']=(Test-Path -LiteralPath $log)
+  Publish 'STARTUP_LOG_LOCATED'
   Check $state['StartupLogPresent'] 'Startup log not found; cannot prove XAML connected'
-  Check ($state['XamlConnectedLogLines'].Count -gt 0) 'XAML diagnostics never reported a connected TAP'
-  Check ($state['XamlFailureLogLines'].Count -eq 0) 'XAML TAP startup, restore or Unadvise reported failure'
-  $events=@(Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=$started;Id=1000,1001,1002} -ErrorAction SilentlyContinue|
-    Where-Object {$_.Message -match 'explorer.exe|StartMenu.exe|StartMenuDLL|StartMenuHelper'}|
-    ForEach-Object {@{Id=$_.Id;Time=$_.TimeCreated.ToString('o');Message=$_.Message}})
+  $lines=@(Get-Content -LiteralPath $log -Encoding Unicode -ErrorAction Stop)
+  $state['XamlConnectedLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connected using'})
+  $state['XamlFailureLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connection failed|Win11StartButtonTap: deactivate failed|Win11StartButtonTap: synchronous restore failed|Win11StartButtonTap: visual tree unadvise failed'})
+  $state['XamlConnectedCount']=$state['XamlConnectedLogLines'].Count
+  $state['XamlFailureCount']=$state['XamlFailureLogLines'].Count
+  Publish 'XAML_LOG_READ'
+  Check ($state['XamlConnectedCount'] -ge 3) 'Expected three successful XAML diagnostics connections'
+  Check ($state['XamlFailureCount'] -eq 0) 'XAML TAP startup, restore or Unadvise reported failure'
+  Publish 'XAML_CONNECTION_AND_LOGS_VERIFIED'
+  # Event log queries are a separate bounded subprocess. Never leave the whole
+  # Windows VM run waiting indefinitely inside Get-WinEvent.
+  $audit=Start-Job -ScriptBlock {
+    param($since)
+    $ErrorActionPreference='Stop'
+    @(Get-WinEvent -FilterHashtable @{
+      LogName='Application'
+      StartTime=$since
+      Id=1000,1001,1002
+    } -ErrorAction SilentlyContinue |
+      Where-Object {$_.Message -match 'explorer.exe|StartMenu.exe|StartMenuDLL|StartMenuHelper'} |
+      ForEach-Object {@{Id=$_.Id;Time=$_.TimeCreated.ToString('o');Message=$_.Message}})
+  } -ArgumentList $started
+  $state['CrashAuditStarted']=(Get-Date).ToString('o')
+  Publish 'CRASH_AUDIT_RUNNING'
+  if (-not (Wait-Job -Job $audit -Timeout 30)) {
+    $state['CrashAudit']='TIMED_OUT_30_SECONDS'
+    Publish 'CRASH_AUDIT_TIMED_OUT'
+    Stop-Job -Job $audit -ErrorAction SilentlyContinue
+    Remove-Job -Job $audit -Force -ErrorAction SilentlyContinue
+    throw 'Windows Application event-log audit timed out after 30 seconds'
+  }
+  $auditErrors=@()
+  $events=@(Receive-Job -Job $audit -ErrorVariable auditErrors -ErrorAction SilentlyContinue)
+  $auditState=$audit.State.ToString()
+  Remove-Job -Job $audit -Force -ErrorAction SilentlyContinue
+  $state['CrashAudit']=$auditState
+  $state['CrashAuditErrors']=@($auditErrors|ForEach-Object {$_.ToString()})
   $state['CrashOrHangEvents']=$events
+  Publish 'CRASH_AUDIT_COMPLETED'
+  Check ($auditState -eq 'Completed' -and $auditErrors.Count -eq 0) 'Windows crash-audit job failed'
   Check ($events.Count -eq 0) 'Explorer or Open-Shell application crash/hang detected'
   $state['StartMenuRunning']=$true
   $state['ExplorerAliveAfterStart']=$true
   $state['ExplorerAliveAfterStop']=$true
   $state['OpenShellIntegration']='FOUR_X64_LIFECYCLE_CYCLES_AND_XAML_CONNECTION_VERIFIED'
+  # Publish terminal result BEFORE copying large diagnostics over the guest share.
+  # If diagnostic-copy blocks, the CI host still has a genuine terminal report.
   Publish 'TEST_COMPLETE' $true
+  foreach($remote in @('Z:\','\\host.lan\Shared\')) {
+    try {
+      Copy-Item -LiteralPath $log -Destination ($remote+'openshell-startup.txt') -Force -ErrorAction Stop
+      break
+    } catch {}
+  }
 } catch {
   $state['Failure']=$_.Exception.ToString()
   $state['OpenShellIntegration']='FAILED_WITH_DETAIL'
