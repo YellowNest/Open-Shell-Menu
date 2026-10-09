@@ -1,0 +1,26 @@
+name: Windows 11 ARM64 installer tooling availability
+permissions:
+  contents: read
+on:
+  push:
+    branches:
+      - review/tap-win11-arm-probe-20261009
+    paths:
+      - '.github/workflows/tap-win11-installer-tools.yml'
+jobs:
+  inspect:
+    runs-on: windows-11-arm
+    steps:
+      - name: Probe WiX 3.14, MSI and package tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wix = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+          [ordered]@{
+            WIX314 = Test-Path (Join-Path $wix 'candle.exe')
+            WIXCandle = (Get-Command candle -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+            WIXLight = (Get-Command light -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+            Choco = (Get-Command choco -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+            Msiexec = (Get-Command msiexec -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+            Admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          } | ConvertTo-Json | Write-Host
