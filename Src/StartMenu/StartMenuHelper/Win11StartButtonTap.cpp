@@ -58,8 +58,8 @@ struct StartElement
 	unsigned int discoveryOrder = 0;
 };
 
-class CWin11StartButtonTap;
-static CComPtr<CWin11StartButtonTap> g_Tap;
+class CXamlDiagnosticsTap;
+static CComPtr<CXamlDiagnosticsTap> g_Tap;
 static std::shared_mutex g_TapMutex;
 
 static bool ContainsText( const CString &text, const wchar_t *part )
@@ -87,123 +87,14 @@ static bool IsStartGlyph( const StartElement &element )
 	return false;
 }
 
-class CWin11StartButtonTap: public IObjectWithSite, public IVisualTreeServiceCallback2
+// Start-specific tree and property policy, independent of COM TAP lifetime.
+class CStartButtonTree
 {
 public:
-	CWin11StartButtonTap( void )
+	void SetVisual( IVisualTreeService *visual ) { m_Visual = visual; }
+
+	bool OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
 	{
-		_AtlModule.Lock();
-		// Each TAP owns exactly one message window for its entire lifetime.
-		m_DispatchStatus = CreateDispatchWindow();
-	}
-
-	~CWin11StartButtonTap( void )
-	{
-		DestroyDispatchWindow();
-		_AtlModule.Unlock();
-	}
-
-	HRESULT DispatchStatus( void ) const { return m_DispatchStatus; }
-
-	STDMETHODIMP QueryInterface( REFIID riid, void **ppv )
-	{
-		if (!ppv)
-			return E_POINTER;
-		*ppv = NULL;
-
-		if (riid == IID_IUnknown || riid == IID_IObjectWithSite)
-			*ppv = static_cast<IObjectWithSite*>(this);
-		else if (riid == __uuidof(IVisualTreeServiceCallback) || riid == __uuidof(IVisualTreeServiceCallback2))
-			*ppv = static_cast<IVisualTreeServiceCallback2*>(this);
-		else
-			return E_NOINTERFACE;
-
-		AddRef();
-		return S_OK;
-	}
-
-	STDMETHODIMP_(ULONG) AddRef( void )
-	{
-		return ++m_Refs;
-	}
-
-	STDMETHODIMP_(ULONG) Release( void )
-	{
-		ULONG refs = --m_Refs;
-		if (!refs)
-			delete this;
-		return refs;
-	}
-
-	STDMETHODIMP SetSite( IUnknown *site )
-	{
-		// A diagnostics TAP has a single site. Exit unregisters its callback,
-		// rather than trying to re-site the existing instance.
-		if (!site)
-			return Deactivate();
-
-		std::lock_guard lifecycleLock(m_LifecycleMutex);
-		if (m_Site)
-			return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
-
-		CComPtr<IVisualTreeService> visual;
-		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&visual);
-		if (FAILED(hr))
-			return hr;
-		if (!visual)
-			return E_NOINTERFACE;
-
-		CComPtr<CWin11StartButtonTap> previous;
-		bool active;
-		{
-			std::unique_lock lock(g_TapMutex);
-			active = g_StartButtonActive;
-			if (active)
-			{
-				m_Site = site;
-				m_Visual = visual;
-				previous.Attach(g_Tap.Detach());
-				g_Tap = this;
-			}
-			else
-				g_ConnectStarted = false;
-		}
-		if (!active)
-			return S_OK;
-
-		hr = ActivateLocked();
-		if (FAILED(hr))
-		{
-			// Preserve the callback when an unsuccessful rollback leaves it advised.
-			if (!m_Advised)
-			{
-				CComPtr<CWin11StartButtonTap> released;
-				{
-					std::unique_lock lock(g_TapMutex);
-					if (g_Tap.p == this)
-						released.Attach(g_Tap.Detach());
-					g_ConnectStarted = false;
-				}
-			}
-			LogToFile(STARTUP_LOG, L"Win11StartButtonTap: activation failed 0x%08X", hr);
-		}
-		return hr;
-	}
-
-	STDMETHODIMP GetSite( REFIID riid, void **ppv )
-	{
-		if (!ppv)
-			return E_POINTER;
-		*ppv = NULL;
-		if (!m_Site)
-			return E_FAIL;
-		return m_Site->QueryInterface(riid, ppv);
-	}
-
-	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
-	{
-		// VisualElement is an [in] parameter. The XAML diagnostics runtime owns
-		// the BSTR fields; copy the values we need but never free callback input.
 		bool interesting = false;
 
 		{
@@ -248,46 +139,9 @@ public:
 			}
 		}
 
-		// AdviseVisualTreeChange replays the existing tree synchronously. Do not
-		// queue partial-state work during that replay; ActivateLocked performs one
-		// complete apply after Advise has returned and the dispatch window exists.
-		if (interesting && m_Advised)
-			RequestApply(g_StartButtonActive && g_StartButtonEnabled);
-		return S_OK;
+		return interesting;
 	}
 
-	STDMETHODIMP OnElementStateChanged( InstanceHandle, VisualElementState, LPCWSTR )
-	{
-		return S_OK;
-	}
-
-	HRESULT Activate( void )
-	{
-		std::lock_guard lock(m_LifecycleMutex);
-		return ActivateLocked();
-	}
-
-	HRESULT Deactivate( void )
-	{
-		CComPtr<CWin11StartButtonTap> releasedTap;
-		HRESULT hr;
-		{
-			std::lock_guard lock(m_LifecycleMutex);
-			hr = DeactivateLocked();
-			if (SUCCEEDED(hr))
-			{
-				std::unique_lock tapLock(g_TapMutex);
-				if (g_Tap.p == this)
-				{
-					releasedTap.Attach(g_Tap.Detach());
-					g_ConnectStarted = false;
-				}
-			}
-		}
-		return hr;
-	}
-
-private:
 	void ResetElements( void )
 	{
 		std::lock_guard lock(m_Mutex);
@@ -307,221 +161,8 @@ private:
 		return false;
 	}
 
-	// Only teardown needs synchronous delivery; ordinary updates just post work.
-	HRESULT RequestApply( bool enabled )
-	{
-		HWND dispatch = m_Dispatch;
-		if (!dispatch)
-			return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
-		return PostMessage(dispatch, WM_OS_STARTBUTTON_APPLY, enabled ? 1 : 0, 0)
-			? S_OK : HRESULT_FROM_WIN32(GetLastError());
-	}
 
-	HRESULT RestoreOnDispatch( void )
-	{
-		HWND dispatch = m_Dispatch;
-		if (!dispatch)
-			return HasOverrides() ? HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE) : S_OK;
-
-		DWORD_PTR result = 0;
-		if (!SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_RESTORE, 0, 0,
-			SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result))
-		{
-			DWORD error = GetLastError();
-			return HRESULT_FROM_WIN32(error ? error : ERROR_TIMEOUT);
-		}
-		return static_cast<HRESULT>(result);
-	}
-
-	HRESULT ActivateLocked( void )
-	{
-		if (!m_Visual)
-			return E_UNEXPECTED;
-		if (FAILED(m_DispatchStatus))
-			return m_DispatchStatus;
-
-		if (!m_Advised)
-		{
-			ResetElements();
-
-			// Advise replays the existing tree synchronously. Until it returns,
-			// OnVisualTreeChange records elements without scheduling partial work.
-			HRESULT hr = m_Visual->AdviseVisualTreeChange(
-				static_cast<IVisualTreeServiceCallback*>(this));
-			if (FAILED(hr))
-			{
-				ResetElements();
-				return hr;
-			}
-			m_Advised = true;
-		}
-
-		m_AllowEnable = true;
-		return RequestApply(g_StartButtonActive && g_StartButtonEnabled);
-	}
-
-	HRESULT DeactivateLocked( void )
-	{
-		if (!m_Visual)
-			return S_OK;
-
-		// First reject queued enable work. The dispatch thread drains queued
-		// messages and restores native properties before we unsubscribe.
-		m_AllowEnable = false;
-		HRESULT hr = RestoreOnDispatch();
-		if (FAILED(hr))
-		{
-			LogToFile(STARTUP_LOG,
-				L"Win11StartButtonTap: synchronous restore failed 0x%08X", hr);
-			return hr;
-		}
-
-		// The callback must remain valid until Unadvise completes. The idle
-		// dispatch window is destroyed by the TAP destructor.
-		if (m_Visual && m_Advised)
-		{
-			hr = m_Visual->UnadviseVisualTreeChange(
-				static_cast<IVisualTreeServiceCallback*>(this));
-			if (FAILED(hr))
-			{
-				LogToFile(STARTUP_LOG,
-					L"Win11StartButtonTap: visual tree unadvise failed 0x%08X", hr);
-				return hr;
-			}
-			m_Advised = false;
-		}
-
-		ResetElements();
-		m_Visual.Release();
-		m_Site.Release();
-		return S_OK;
-	}
-
-	HRESULT CreateDispatchWindow( void )
-	{
-		HWND dispatch = m_Dispatch;
-		if (dispatch)
-		{
-			if (IsWindow(dispatch))
-				return S_OK;
-			m_Dispatch = NULL;
-		}
-
-		WNDCLASS wc = {};
-		HMODULE module = GetThisModule();
-		if (!module)
-			return E_FAIL;
-
-		// Window classes registered by DLLs survive FreeLibrary. Register
-		// and create together, and unregister after the last window closes.
-		std::lock_guard classLock(g_DispatchClassMutex);
-		wc.lpfnWndProc = DispatchProc;
-		wc.hInstance = module;
-		wc.lpszClassName = DISPATCH_WINDOW_CLASS;
-		if (!RegisterClass(&wc))
-		{
-			DWORD error = GetLastError();
-			if (error != ERROR_CLASS_ALREADY_EXISTS)
-				return HRESULT_FROM_WIN32(error);
-		}
-
-		dispatch = CreateWindowEx(0, DISPATCH_WINDOW_CLASS, L"", 0, 0, 0, 0, 0,
-			HWND_MESSAGE, NULL, module, this);
-		if (!dispatch)
-		{
-			DWORD error = GetLastError();
-			UnregisterClass(DISPATCH_WINDOW_CLASS, module);
-			return HRESULT_FROM_WIN32(error);
-		}
-
-		m_Dispatch = dispatch;
-		return S_OK;
-	}
-
-	HRESULT DestroyDispatchWindow( void )
-	{
-		HWND dispatch = m_Dispatch;
-		if (!dispatch)
-			return S_OK;
-		if (!IsWindow(dispatch))
-		{
-			m_Dispatch = NULL;
-			std::lock_guard classLock(g_DispatchClassMutex);
-			UnregisterClass(DISPATCH_WINDOW_CLASS, GetThisModule());
-			return S_OK;
-		}
-
-		if (GetWindowThreadProcessId(dispatch, NULL) == GetCurrentThreadId())
-		{
-			DrainApplyMessages(dispatch);
-			SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
-			if (!DestroyWindow(dispatch))
-			{
-				DWORD error = GetLastError();
-				if (IsWindow(dispatch))
-					SetWindowLongPtr(dispatch, GWLP_USERDATA, (LONG_PTR)this);
-				return HRESULT_FROM_WIN32(error);
-			}
-			m_Dispatch = NULL;
-			std::lock_guard classLock(g_DispatchClassMutex);
-			UnregisterClass(DISPATCH_WINDOW_CLASS, GetThisModule());
-			return S_OK;
-		}
-
-		DWORD_PTR result = 0;
-		SetLastError(ERROR_SUCCESS);
-		LRESULT sent = SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_DESTROY, 0, 0,
-			SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result);
-		if (!sent && IsWindow(dispatch))
-		{
-			DWORD error = GetLastError();
-			if (!error)
-				error = ERROR_TIMEOUT;
-			return HRESULT_FROM_WIN32(error);
-		}
-
-		if (IsWindow(dispatch))
-			return E_FAIL;
-
-		m_Dispatch = NULL;
-		return S_OK;
-	}
-
-	static void DrainApplyMessages( HWND hwnd )
-	{
-		MSG pending;
-		while (PeekMessage(&pending, hwnd, WM_OS_STARTBUTTON_APPLY, WM_OS_STARTBUTTON_APPLY, PM_REMOVE))
-		{
-		}
-	}
-
-	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
-	{
-		CWin11StartButtonTap *tap = (CWin11StartButtonTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-		if (msg == WM_NCCREATE)
-		{
-			CREATESTRUCT *create = (CREATESTRUCT*)lParam;
-			tap = (CWin11StartButtonTap*)create->lpCreateParams;
-			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)tap);
-		}
-		if (msg == WM_OS_STARTBUTTON_DESTROY && tap)
-			return static_cast<LRESULT>(tap->DestroyDispatchWindow());
-		if (msg == WM_OS_STARTBUTTON_RESTORE && tap)
-		{
-			DrainApplyMessages(hwnd);
-			return static_cast<LRESULT>(tap->ApplyState(false));
-		}
-		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
-		{
-			// A queued enable request must never re-apply overrides once teardown
-			// has started, even if Open-Shell is replacing the diagnostics site.
-			bool enabled = wParam != 0 && tap->m_AllowEnable &&
-				g_StartButtonActive && g_StartButtonEnabled;
-			return static_cast<LRESULT>(tap->ApplyState(enabled));
-		}
-		return DefWindowProc(hwnd, msg, wParam, lParam);
-	}
-
+private:
 	InstanceHandle FindStartAncestorLocked( InstanceHandle parent ) const
 	{
 		for (int depth = 0; depth < 24 && parent; depth++)
@@ -713,6 +354,7 @@ private:
 		}
 	}
 
+	public:
 	HRESULT ApplyState( bool enabled )
 	{
 		if (!m_Visual)
@@ -817,23 +459,396 @@ private:
 		return firstError;
 	}
 
+
+	CComPtr<IVisualTreeService> m_Visual;
+	std::mutex m_Mutex;
+	InstanceHandle m_PrimaryStart = 0;
+	unsigned int m_NextDiscoveryOrder = 0;
+	// Keep ancestry from replay for Start-button glyph classification.
+	std::unordered_map<InstanceHandle, StartElement> m_Elements;
+};
+
+class CXamlDiagnosticsTap: public IObjectWithSite, public IVisualTreeServiceCallback2
+{
+public:
+	CXamlDiagnosticsTap( void )
+	{
+		_AtlModule.Lock();
+		// Each TAP owns exactly one message window for its entire lifetime.
+		m_DispatchStatus = CreateDispatchWindow();
+	}
+
+	~CXamlDiagnosticsTap( void )
+	{
+		DestroyDispatchWindow();
+		_AtlModule.Unlock();
+	}
+
+	HRESULT DispatchStatus( void ) const { return m_DispatchStatus; }
+
+	STDMETHODIMP QueryInterface( REFIID riid, void **ppv )
+	{
+		if (!ppv)
+			return E_POINTER;
+		*ppv = NULL;
+
+		if (riid == IID_IUnknown || riid == IID_IObjectWithSite)
+			*ppv = static_cast<IObjectWithSite*>(this);
+		else if (riid == __uuidof(IVisualTreeServiceCallback) || riid == __uuidof(IVisualTreeServiceCallback2))
+			*ppv = static_cast<IVisualTreeServiceCallback2*>(this);
+		else
+			return E_NOINTERFACE;
+
+		AddRef();
+		return S_OK;
+	}
+
+	STDMETHODIMP_(ULONG) AddRef( void )
+	{
+		return ++m_Refs;
+	}
+
+	STDMETHODIMP_(ULONG) Release( void )
+	{
+		ULONG refs = --m_Refs;
+		if (!refs)
+			delete this;
+		return refs;
+	}
+
+	STDMETHODIMP SetSite( IUnknown *site )
+	{
+		// A diagnostics TAP has a single site. Exit unregisters its callback,
+		// rather than trying to re-site the existing instance.
+		if (!site)
+			return Deactivate();
+
+		std::lock_guard lifecycleLock(m_LifecycleMutex);
+		if (m_Site)
+			return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+
+		CComPtr<IVisualTreeService> visual;
+		HRESULT hr = site->QueryInterface(__uuidof(IVisualTreeService), (void**)&visual);
+		if (FAILED(hr))
+			return hr;
+		if (!visual)
+			return E_NOINTERFACE;
+
+		CComPtr<CXamlDiagnosticsTap> previous;
+		bool active;
+		{
+			std::unique_lock lock(g_TapMutex);
+			active = g_StartButtonActive;
+			if (active)
+			{
+				m_Site = site;
+				m_Visual = visual;
+				m_StartTree.SetVisual(visual);
+				previous.Attach(g_Tap.Detach());
+				g_Tap = this;
+			}
+			else
+				g_ConnectStarted = false;
+		}
+		if (!active)
+			return S_OK;
+
+		hr = ActivateLocked();
+		if (FAILED(hr))
+		{
+			// Preserve the callback when an unsuccessful rollback leaves it advised.
+			if (!m_Advised)
+			{
+				CComPtr<CXamlDiagnosticsTap> released;
+				{
+					std::unique_lock lock(g_TapMutex);
+					if (g_Tap.p == this)
+						released.Attach(g_Tap.Detach());
+					g_ConnectStarted = false;
+				}
+			}
+			LogToFile(STARTUP_LOG, L"Win11StartButtonTap: activation failed 0x%08X", hr);
+		}
+		return hr;
+	}
+
+	STDMETHODIMP GetSite( REFIID riid, void **ppv )
+	{
+		if (!ppv)
+			return E_POINTER;
+		*ppv = NULL;
+		if (!m_Site)
+			return E_FAIL;
+		return m_Site->QueryInterface(riid, ppv);
+	}
+
+	STDMETHODIMP OnVisualTreeChange( ParentChildRelation relation, VisualElement element, VisualMutationType mutationType )
+	{
+		if (m_StartTree.OnVisualTreeChange(relation, element, mutationType) && m_Advised)
+			RequestApply(g_StartButtonActive && g_StartButtonEnabled);
+		return S_OK;
+	}
+
+	STDMETHODIMP OnElementStateChanged( InstanceHandle, VisualElementState, LPCWSTR )
+	{
+		return S_OK;
+	}
+
+	HRESULT Activate( void )
+	{
+		std::lock_guard lock(m_LifecycleMutex);
+		return ActivateLocked();
+	}
+
+	HRESULT Deactivate( void )
+	{
+		CComPtr<CXamlDiagnosticsTap> releasedTap;
+		HRESULT hr;
+		{
+			std::lock_guard lock(m_LifecycleMutex);
+			hr = DeactivateLocked();
+			if (SUCCEEDED(hr))
+			{
+				std::unique_lock tapLock(g_TapMutex);
+				if (g_Tap.p == this)
+				{
+					releasedTap.Attach(g_Tap.Detach());
+					g_ConnectStarted = false;
+				}
+			}
+		}
+		return hr;
+	}
+
+private:
+	// Only teardown needs synchronous delivery; ordinary updates just post work.
+	HRESULT RequestApply( bool enabled )
+	{
+		HWND dispatch = m_Dispatch;
+		if (!dispatch)
+			return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+		return PostMessage(dispatch, WM_OS_STARTBUTTON_APPLY, enabled ? 1 : 0, 0)
+			? S_OK : HRESULT_FROM_WIN32(GetLastError());
+	}
+
+	HRESULT RestoreOnDispatch( void )
+	{
+		HWND dispatch = m_Dispatch;
+		if (!dispatch)
+			return m_StartTree.HasOverrides() ? HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE) : S_OK;
+
+		DWORD_PTR result = 0;
+		if (!SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_RESTORE, 0, 0,
+			SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result))
+		{
+			DWORD error = GetLastError();
+			return HRESULT_FROM_WIN32(error ? error : ERROR_TIMEOUT);
+		}
+		return static_cast<HRESULT>(result);
+	}
+
+	HRESULT ActivateLocked( void )
+	{
+		if (!m_Visual)
+			return E_UNEXPECTED;
+		if (FAILED(m_DispatchStatus))
+			return m_DispatchStatus;
+
+		if (!m_Advised)
+		{
+			m_StartTree.ResetElements();
+
+			// Advise replays the existing tree synchronously. Until it returns,
+			// OnVisualTreeChange records elements without scheduling partial work.
+			HRESULT hr = m_Visual->AdviseVisualTreeChange(
+				static_cast<IVisualTreeServiceCallback*>(this));
+			if (FAILED(hr))
+			{
+				m_StartTree.ResetElements();
+				return hr;
+			}
+			m_Advised = true;
+		}
+
+		m_AllowEnable = true;
+		return RequestApply(g_StartButtonActive && g_StartButtonEnabled);
+	}
+
+	HRESULT DeactivateLocked( void )
+	{
+		if (!m_Visual)
+			return S_OK;
+
+		// First reject queued enable work. The dispatch thread drains queued
+		// messages and restores native properties before we unsubscribe.
+		m_AllowEnable = false;
+		HRESULT hr = RestoreOnDispatch();
+		if (FAILED(hr))
+		{
+			LogToFile(STARTUP_LOG,
+				L"Win11StartButtonTap: synchronous restore failed 0x%08X", hr);
+			return hr;
+		}
+
+		// The callback must remain valid until Unadvise completes. The idle
+		// dispatch window is destroyed by the TAP destructor.
+		if (m_Visual && m_Advised)
+		{
+			hr = m_Visual->UnadviseVisualTreeChange(
+				static_cast<IVisualTreeServiceCallback*>(this));
+			if (FAILED(hr))
+			{
+				LogToFile(STARTUP_LOG,
+					L"Win11StartButtonTap: visual tree unadvise failed 0x%08X", hr);
+				return hr;
+			}
+			m_Advised = false;
+		}
+
+		m_StartTree.ResetElements();
+		m_StartTree.SetVisual(NULL);
+		m_Visual.Release();
+		m_Site.Release();
+		return S_OK;
+	}
+
+	HRESULT CreateDispatchWindow( void )
+	{
+		HWND dispatch = m_Dispatch;
+		if (dispatch)
+		{
+			if (IsWindow(dispatch))
+				return S_OK;
+			m_Dispatch = NULL;
+		}
+
+		WNDCLASS wc = {};
+		HMODULE module = GetThisModule();
+		if (!module)
+			return E_FAIL;
+
+		// Window classes registered by DLLs survive FreeLibrary. Register
+		// and create together, and unregister after the last window closes.
+		std::lock_guard classLock(g_DispatchClassMutex);
+		wc.lpfnWndProc = DispatchProc;
+		wc.hInstance = module;
+		wc.lpszClassName = DISPATCH_WINDOW_CLASS;
+		if (!RegisterClass(&wc))
+		{
+			DWORD error = GetLastError();
+			if (error != ERROR_CLASS_ALREADY_EXISTS)
+				return HRESULT_FROM_WIN32(error);
+		}
+
+		dispatch = CreateWindowEx(0, DISPATCH_WINDOW_CLASS, L"", 0, 0, 0, 0, 0,
+			HWND_MESSAGE, NULL, module, this);
+		if (!dispatch)
+		{
+			DWORD error = GetLastError();
+			UnregisterClass(DISPATCH_WINDOW_CLASS, module);
+			return HRESULT_FROM_WIN32(error);
+		}
+
+		m_Dispatch = dispatch;
+		return S_OK;
+	}
+
+	HRESULT DestroyDispatchWindow( void )
+	{
+		HWND dispatch = m_Dispatch;
+		if (!dispatch)
+			return S_OK;
+		if (!IsWindow(dispatch))
+		{
+			m_Dispatch = NULL;
+			std::lock_guard classLock(g_DispatchClassMutex);
+			UnregisterClass(DISPATCH_WINDOW_CLASS, GetThisModule());
+			return S_OK;
+		}
+
+		if (GetWindowThreadProcessId(dispatch, NULL) == GetCurrentThreadId())
+		{
+			DrainApplyMessages(dispatch);
+			SetWindowLongPtr(dispatch, GWLP_USERDATA, 0);
+			if (!DestroyWindow(dispatch))
+			{
+				DWORD error = GetLastError();
+				if (IsWindow(dispatch))
+					SetWindowLongPtr(dispatch, GWLP_USERDATA, (LONG_PTR)this);
+				return HRESULT_FROM_WIN32(error);
+			}
+			m_Dispatch = NULL;
+			std::lock_guard classLock(g_DispatchClassMutex);
+			UnregisterClass(DISPATCH_WINDOW_CLASS, GetThisModule());
+			return S_OK;
+		}
+
+		DWORD_PTR result = 0;
+		SetLastError(ERROR_SUCCESS);
+		LRESULT sent = SendMessageTimeout(dispatch, WM_OS_STARTBUTTON_DESTROY, 0, 0,
+			SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result);
+		if (!sent && IsWindow(dispatch))
+		{
+			DWORD error = GetLastError();
+			if (!error)
+				error = ERROR_TIMEOUT;
+			return HRESULT_FROM_WIN32(error);
+		}
+
+		if (IsWindow(dispatch))
+			return E_FAIL;
+
+		m_Dispatch = NULL;
+		return S_OK;
+	}
+
+	static void DrainApplyMessages( HWND hwnd )
+	{
+		MSG pending;
+		while (PeekMessage(&pending, hwnd, WM_OS_STARTBUTTON_APPLY, WM_OS_STARTBUTTON_APPLY, PM_REMOVE))
+		{
+		}
+	}
+
+	static LRESULT CALLBACK DispatchProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
+	{
+		CXamlDiagnosticsTap *tap = (CXamlDiagnosticsTap*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+		if (msg == WM_NCCREATE)
+		{
+			CREATESTRUCT *create = (CREATESTRUCT*)lParam;
+			tap = (CXamlDiagnosticsTap*)create->lpCreateParams;
+			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)tap);
+		}
+		if (msg == WM_OS_STARTBUTTON_DESTROY && tap)
+			return static_cast<LRESULT>(tap->DestroyDispatchWindow());
+		if (msg == WM_OS_STARTBUTTON_RESTORE && tap)
+		{
+			DrainApplyMessages(hwnd);
+			return static_cast<LRESULT>(tap->m_StartTree.ApplyState(false));
+		}
+		if (msg == WM_OS_STARTBUTTON_APPLY && tap)
+		{
+			// A queued enable request must never re-apply overrides once teardown
+			// has started, even if Open-Shell is replacing the diagnostics site.
+			bool enabled = wParam != 0 && tap->m_AllowEnable &&
+				g_StartButtonActive && g_StartButtonEnabled;
+			return static_cast<LRESULT>(tap->m_StartTree.ApplyState(enabled));
+		}
+		return DefWindowProc(hwnd, msg, wParam, lParam);
+	}
+
 	std::atomic<ULONG> m_Refs{ 1 };
 	HRESULT m_DispatchStatus = E_UNEXPECTED;
 	std::atomic_bool m_Advised{ false };
 	std::atomic_bool m_AllowEnable{ false };
 	std::atomic<HWND> m_Dispatch{ NULL };
 	std::mutex m_LifecycleMutex;
-	std::mutex m_Mutex;
 	CComPtr<IUnknown> m_Site;
 	CComPtr<IVisualTreeService> m_Visual;
-	InstanceHandle m_PrimaryStart = 0;
-	unsigned int m_NextDiscoveryOrder = 0;
-	// Keep the replayed ancestry while subscribed. Parent links are required to
-	// recognize glyphs under a Start control, and the map is cleared on unadvise.
-	std::unordered_map<InstanceHandle, StartElement> m_Elements;
+	CStartButtonTree m_StartTree;
 };
 
-static CComPtr<CWin11StartButtonTap> GetTapRef( void )
+static CComPtr<CXamlDiagnosticsTap> GetTapRef( void )
 {
 	std::shared_lock lock(g_TapMutex);
 	return g_Tap;
@@ -865,8 +880,8 @@ public:
 		if (outer)
 			return CLASS_E_NOAGGREGATION;
 
-		CComPtr<CWin11StartButtonTap> tap;
-		tap.Attach(new CWin11StartButtonTap());
+		CComPtr<CXamlDiagnosticsTap> tap;
+		tap.Attach(new CXamlDiagnosticsTap());
 		if (!tap)
 			return E_OUTOFMEMORY;
 		HRESULT hr = tap->DispatchStatus();
@@ -1007,7 +1022,7 @@ extern "C" void UpdateWin11StartButtonTap( BOOL enabled, BOOL allTaskbars )
 
 extern "C" void StopWin11StartButtonTap( void )
 {
-	CComPtr<CWin11StartButtonTap> tap;
+	CComPtr<CXamlDiagnosticsTap> tap;
 	{
 		// Serialize stop with SetSite publishing the global TAP pointer.
 		std::unique_lock lock(g_TapMutex);
