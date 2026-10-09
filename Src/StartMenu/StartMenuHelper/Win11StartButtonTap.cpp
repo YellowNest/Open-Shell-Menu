@@ -1117,6 +1117,17 @@ extern "C" void StopWin11StartButtonTap( void )
 	{
 		HRESULT hr = tap->Deactivate();
 		if (FAILED(hr))
+		{
 			LogToFile(STARTUP_LOG, L"Win11StartButtonTap: deactivate failed 0x%08X", hr);
+			// The DLL caller drops its LoadLibrary reference after Stop.
+			// If a callback or dispatch window remains live, keep a loader
+			// reference to avoid executing callbacks in an unloaded DLL.
+			static std::mutex failurePinMutex;
+			static HMODULE failurePin = NULL;
+			std::lock_guard pinLock(failurePinMutex);
+			if (!failurePin && !GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+				(LPCTSTR)&StopWin11StartButtonTap, &failurePin))
+				LogToFile(STARTUP_LOG, L"Win11StartButtonTap: failed to retain DLL after unsuccessful stop");
+		}
 	}
 }
