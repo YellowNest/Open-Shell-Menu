@@ -43,19 +43,22 @@ jobs:
           cp .github/tap-tests/win11_native_x64_guest_probe.ps1 "$ROOT/oem/"
           echo "Staged guest verification script"
 
-      - name: Retrieve already-built hardened installer when artifact endpoint works
+      - name: Fetch raw v7 installer with compatible v8 download action
+        uses: actions/download-artifact@v8
+        with:
+          name: OpenShellSetup_4_4_202.exe
+          run-id: 37966360367
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/win11-native-x64/shared
+      - name: Verify exact hardened installer digest
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          ROOT="$RUNNER_TEMP/win11-native-x64"
-          if gh run download 37966360367 -R YellowNest/Open-Shell-Menu -n OpenShellSetup_4_4_202.exe -D "$ROOT/shared"; then
-            echo 'VALIDATED_INSTALLER_STAGED=yes'
-            find "$ROOT/shared" -maxdepth 1 -type f -printf '%f %s bytes\n'
-          else
-            echo 'VALIDATED_INSTALLER_STAGED=no'
-            echo 'Guest OS/Explorer verification will continue without false app test claims.'
-          fi
+          set -euo pipefail
+          exe="$RUNNER_TEMP/win11-native-x64/shared/OpenShellSetup_4_4_202.exe"
+          test -s "$exe"
+          echo "10f976b90127f6d7a402a9934949de50eeffa71f6687133f9f88b5b23692882f  $exe" | sha256sum -c -
+          file "$exe"
+          echo "VALIDATED_HARDENED_INSTALLER_READY=yes"
 
       - name: Install native x64 Windows 11 inside nested QEMU-KVM
         shell: bash
@@ -76,11 +79,21 @@ jobs:
           found=0
           for n in $(seq 1 184); do
             if test -s "$ROOT/shared/win11-native-x64-proof.json"; then
-              cp "$ROOT/shared/win11-native-x64-proof.json" "$ROOT/evidence/"
-              echo 'GUEST_REPORT_FOUND'
-              cat "$ROOT/shared/win11-native-x64-proof.json"
-              found=1
-              break
+              stage=$(python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json,sys
+          try:
+              with open(sys.argv[1], encoding='utf-8-sig') as f: j=json.load(f)
+              print(j.get('OpenShellIntegration') or j.get('Stage') or 'BOOTSTRAP')
+          except (OSError,ValueError): print('BOOTSTRAP')
+          PY
+              )
+              if test "$stage" != BOOTSTRAP; then
+                cp "$ROOT/shared/win11-native-x64-proof.json" "$ROOT/evidence/"
+                echo "GUEST_FINAL_STAGE=$stage"
+                cat "$ROOT/shared/win11-native-x64-proof.json"
+                found=1
+                break
+              fi
             fi
             if ! sudo docker inspect -f '{{.State.Running}}' openshell-win11-native-x64 | grep -q true; then
               echo 'VM_EXITED_BEFORE_REPORT'
@@ -107,7 +120,16 @@ jobs:
               raise SystemExit('FAILED: explorer.exe not proven running')
           print('PASS: genuine native Windows 11 x64 and explorer.exe observed from inside guest')
           print('Taskbar:', result.get('TaskbarDetected'))
-          print('Open-Shell integration:', result.get('OpenShellIntegration', 'not run'))
+          print('Explorer session(s):', [p['SessionId'] for p in result.get('ExplorerProcesses',[])])
+          print('Probe session:', result.get('CurrentSessionId'))
+          integration=result.get('OpenShellIntegration')
+          assert integration=='START_STOP_EXECUTED_NOT_XAML_VISUALLY_VERIFIED', integration
+          assert result.get('InstallerExit') in (0,3010),result
+          assert result.get('StartMenuRunning') is True,result
+          assert result.get('ExplorerAliveAfterStart') is True,result
+          assert result.get('ExplorerAliveAfterStop') is True,result
+          print('PASS: hardened Open-Shell x64 installation, StartMenu start/stop and Explorer survival')
+          print('LIMITATION: XAML visual restore and centered taskbar appearance still untested')
           PY
 
       - name: Preserve guest VM logs even on failure
