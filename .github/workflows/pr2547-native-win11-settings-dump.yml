@@ -64,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           for n in $(seq 1 70); do
-            artifacts=$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/38064428813/artifacts" --jq '.artifacts[].name' || true)
-            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-review.exe"; then
+            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38077892009/artifacts" --jq '.artifacts[].name' || true)
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-7b0f05a.exe"; then
               echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
               exit 0
             fi
@@ -78,8 +78,9 @@ jobs:
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
         with:
-          name: OpenShellSetup_4_4_202-pr-review.exe
-          run-id: 38064428813
+          name: OpenShellSetup_4_4_202-pr-7b0f05a.exe
+          run-id: 38077892009
+          repository: Open-Shell/Open-Shell-Menu
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/win11-native-x64/shared
       - name: Verify exact source installer and publish guest integrity manifest
