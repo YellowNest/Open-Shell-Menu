@@ -60,7 +60,7 @@ jobs:
           set -euo pipefail
           for n in $(seq 1 70); do
             artifacts=$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/38058659243/artifacts" --jq '.artifacts[].name' || true)
-            if printf '%s\n' "$artifacts" | grep -Fxq "pr2547-review-native-win11-setup"; then
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-review.exe"; then
               echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
               exit 0
             fi
@@ -73,7 +73,7 @@ jobs:
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
         with:
-          name: pr2547-review-native-win11-setup
+          name: OpenShellSetup_4_4_202-pr-review.exe
           run-id: 38058659243
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/win11-native-x64/shared
