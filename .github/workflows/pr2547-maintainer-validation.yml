@@ -6,7 +6,7 @@ on:
     branches: [review/pr2547-maintainer-20261010]
     paths:
       - 'Src/**'
-      - '.github/tap-tests/**'
+      - '.github/tap-tests/tap_com_smoke.cpp'
       - '.github/workflows/pr2547-maintainer-validation.yml'
   workflow_dispatch:
 jobs:
