@@ -6,6 +6,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 static const CLSID TapClsid =
     {0x7d15741f, 0x2f3b, 0x4971, {0xb8,0x91,0x6a,0x5d,0x42,0xd7,0x1a,0x34}};
@@ -168,6 +169,51 @@ int main() {
     Check(service->live == 0, "later Unadvise releases retained callback");
     retained->Release();
     contender->Release();
+
+    // A burst of contenders must not replace an already subscribed owner.
+    // Keep the owner on this thread so its message-only dispatch survives
+    // until shutdown; the contenders can race on independent worker threads.
+    constexpr int contenders = 24;
+    start(FALSE, FALSE);
+    IObjectWithSite* burstOwner = newTap();
+    Check(SUCCEEDED(burstOwner->SetSite(service)), "burst owner registered");
+    const int beforeBurst = service->adviseCalls;
+    std::vector<IObjectWithSite*> competing;
+    competing.reserve(contenders);
+    for (int i = 0; i < contenders; ++i) competing.push_back(newTap());
+    std::vector<HRESULT> outcomes(contenders, E_UNEXPECTED);
+    std::vector<std::thread> workers;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    for (int i = 0; i < contenders; ++i) {
+        workers.emplace_back([&, i] {
+            ++ready;
+            while (!go) std::this_thread::yield();
+            outcomes[i] = competing[i]->SetSite(service);
+        });
+    }
+    while (ready != contenders) std::this_thread::yield();
+    go = true;
+    for (auto& worker : workers) worker.join();
+    for (HRESULT result : outcomes)
+        Check(result == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+              "concurrent contender rejected");
+    Check(service->adviseCalls == beforeBurst && service->live == 1,
+          "contenders did not register callbacks");
+    stop();
+    Check(service->live == 0, "burst owner unsubscribed");
+    for (auto* tap : competing) tap->Release();
+    burstOwner->Release();
+
+    // A valid successor must be able to claim ownership after a clean stop.
+    start(FALSE, FALSE);
+    IObjectWithSite* afterBurst = newTap();
+    Check(SUCCEEDED(afterBurst->SetSite(service)),
+          "successor registered after burst cleanup");
+    Check(service->live == 1, "successor owns one callback");
+    stop();
+    Check(service->live == 0, "successor removed its callback");
+    afterBurst->Release();
 
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
