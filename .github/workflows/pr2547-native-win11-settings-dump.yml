@@ -57,29 +57,29 @@ jobs:
           grep -Fq "WWAHost" "$ROOT/oem/win11_native_x64_stress.ps1"
           echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
 
-      - name: Wait for matching review-branch unsigned installer artifact
+      - name: Wait for exact upstream PR unsigned installer artifact
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for n in $(seq 1 70); do
-            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38077892009/artifacts" --jq '.artifacts[].name' || true)
-            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-7b0f05a.exe"; then
+            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38082438814/artifacts" --jq '.artifacts[].name' || true)
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-4279bc7.exe"; then
               echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
               exit 0
             fi
             echo "ARTIFACT_WAIT_CHECK=$n"
             sleep 15
           done
-          echo "ERROR: exact review-branch installer never published"
+          echo "ERROR: exact upstream PR installer never published"
           exit 4
 
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
         with:
-          name: OpenShellSetup_4_4_202-pr-7b0f05a.exe
-          run-id: 38077892009
+          name: OpenShellSetup_4_4_202-pr-4279bc7.exe
+          run-id: 38082438814
           repository: Open-Shell/Open-Shell-Menu
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/win11-native-x64/shared
@@ -101,7 +101,7 @@ jobs:
           DEST="$ROOT/OpenShellSetup_4_4_202.exe"
           if test "$candidate" != "$DEST"; then mv "$candidate" "$DEST"; fi
           sha256sum "$DEST" | awk '{print $1}' > "$ROOT/installer.sha256"
-          echo "EXACT_BRANCH_INSTALLER_SHA=$(cat "$ROOT/installer.sha256")"
+          echo "EXACT_UPSTREAM_INSTALLER_SHA=$(cat "$ROOT/installer.sha256")"
           echo 'VALIDATED_PATCHED_REVIEW_INSTALLER_READY=yes'
 
       - name: Install native x64 Windows 11 inside nested QEMU-KVM
