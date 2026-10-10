@@ -290,8 +290,10 @@ public static class ShellProbe {
     New-ItemProperty -Path $reg -Name EnableStartButton -PropertyType DWord -Value 1 -Force|Out-Null
     $case['ExplorerPidsBefore']=@((ProcessList 'explorer')|ForEach-Object Id)
     Publish ('EXTENDED_CYCLE_'+$i+'_START')
-    $p=Start-Process -FilePath $exe -PassThru
+    # Reproduce the original crash: launch from the Settings shortcut after Exit.
+    $p=Start-Process -FilePath $exe -ArgumentList '-settings' -PassThru
     $case['LaunchedPID']=$p.Id
+    $case['ColdLaunchViaSettings']=true
     Start-Sleep -Seconds 8
     $case['MenuPIDs']=@((ProcessList 'StartMenu')|ForEach-Object Id)
     $case['ExplorerAlive']=((ProcessList 'explorer').Count -gt 0)
@@ -300,6 +302,21 @@ public static class ShellProbe {
     Check $case['ExplorerAlive'] ('Explorer stopped during extended cycle '+$i)
     Check $case['HelperLoadedInExplorer'] ('XAML helper not loaded in extended cycle '+$i)
     $case['NativeStartUIA']=UIAStart
+    $state['SettingsRequests']++
+    $coldDialogs=@()
+    for($z=0;$z -lt 15;$z++){
+      $coldDialogs=@(OpenShellSettingsWindows)
+      if($coldDialogs.Count -gt 0){break}
+      Start-Sleep -Seconds 1
+    }
+    $case['ColdSettingsDialogs']=@($coldDialogs|ForEach-Object {$_.Title})
+    $case['ColdSettingsDialogObserved']=$coldDialogs.Count -gt 0
+    if($case['ColdSettingsDialogObserved']){$state['SettingsDialogsObserved']++}
+    Publish ('COLD_SETTINGS_DIALOG_'+$i+'_OBSERVED')
+    if(-not $case['ColdSettingsDialogObserved']){Screenshot ('cold-settings-missing-'+$i)}
+    Check $case['ColdSettingsDialogObserved'] ('Cold StartMenu.exe -settings dialog missing in cycle '+$i)
+    foreach($window in $coldDialogs){$null=[ShellProbe]::PostMessage($window.Hwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)}
+    Start-Sleep -Seconds 2
     Screenshot ('tap-cycle-'+$i+'-active')
     if(($i % 3) -eq 0){
       $state['SettingsRequests']++
@@ -461,7 +478,7 @@ public static class TAPTaskbarVisualDiff {
   $state['ExplorerAliveAfterStop']=$true
   CollectDumps
   Check ($state['DumpFileCount'] -eq 0) 'WER captured a native Explorer/StartMenu crash dump'
-  Check ($state['SettingsRequests'] -eq 4 -and $state['SettingsDialogsObserved'] -eq 4) 'Settings dialog coverage incomplete'
+  Check ($state['SettingsRequests'] -eq 16 -and $state['SettingsDialogsObserved'] -eq 16) 'Cold/warm settings dialog coverage incomplete'
   $state['OpenShellIntegration']='SIXTEEN_X64_CYCLES_SETTINGS_AND_WER_VERIFIED'
   # Publish terminal result BEFORE copying large diagnostics over the guest share.
   # If diagnostic-copy blocks, the CI host still has a genuine terminal report.
