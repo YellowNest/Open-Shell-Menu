@@ -20,6 +20,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: review/pr2547-maintainer-20261010
+      - name: Wait for matching upstream installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          for ($attempt = 0; $attempt -lt 90; ++$attempt) {
+            $response = gh api 'repos/Open-Shell/Open-Shell-Menu/actions/runs/38085026905/artifacts' |
+              ConvertFrom-Json
+            if ($response.artifacts.name -contains 'OpenShellSetup_4_4_202-pr-70bd544.exe') {
+              Write-Output 'Exact upstream installer is available'
+              exit 0
+            }
+            Start-Sleep -Seconds 10
+          }
+          throw 'Exact upstream installer was not published'
       - name: Get installer from exact upstream PR commit
         uses: actions/download-artifact@v8
         with:
