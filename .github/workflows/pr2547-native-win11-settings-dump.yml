@@ -11,6 +11,7 @@ on:
     paths:
       - '.github/workflows/pr2547-native-win11-settings-dump.yml'
       - '.github/tap-tests/win11_native_x64_stress.ps1'
+      - '.github/tap-tests/win11_native_x64_crash_repro.ps1'
       - '.github/tap-tests/install.bat'
 
 jobs:
