@@ -34,7 +34,7 @@ jobs:
           $msbuild=Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
           & $msbuild 'Src\OpenShell.sln' '/m' '/t:Restore' '/p:RestorePackagesConfig=true' '/verbosity:minimal' '/nologo'
           if($LASTEXITCODE -ne 0){throw "Restore failed ($LASTEXITCODE)"}
-          & $msbuild 'Src\OpenShell.sln' '/m:2' '/p:MultiProcessorCompilation=false' '/t:Rebuild' '/p:Configuration=Setup' '/p:Platform=x64' "/p:PlatformToolset=$env:TOOLSET" '/verbosity:minimal' '/nologo'
+          & $msbuild 'Src\OpenShell.sln' '/m:1' '/p:MultiProcessorCompilation=false' '/p:CL_MPCount=1' '/t:Rebuild' '/p:Configuration=Setup' '/p:Platform=x64' "/p:PlatformToolset=$env:TOOLSET" '/verbosity:minimal' '/nologo'
           if($LASTEXITCODE -ne 0){throw "Patched x64 source compile failed ($LASTEXITCODE)"}
           Write-Host 'PASS: patched source compiles with current toolchain'
       - name: Verify COM activation, repeated shutdown and unload in 400 cycles
