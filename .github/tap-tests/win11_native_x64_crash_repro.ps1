@@ -293,7 +293,7 @@ public static class ShellProbe {
     # Reproduce the original crash: launch from the Settings shortcut after Exit.
     $p=Start-Process -FilePath $exe -ArgumentList '-settings' -PassThru
     $case['LaunchedPID']=$p.Id
-    $case['ColdLaunchViaSettings']=true
+    $case['ColdLaunchViaSettings']=$true
     Start-Sleep -Seconds 8
     $case['MenuPIDs']=@((ProcessList 'StartMenu')|ForEach-Object Id)
     $case['ExplorerAlive']=((ProcessList 'explorer').Count -gt 0)
