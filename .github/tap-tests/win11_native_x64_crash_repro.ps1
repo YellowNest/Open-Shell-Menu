@@ -385,6 +385,29 @@ public static class TAPTaskbarVisualDiff {
       return count;
     }
   }
+
+  // Compare the colored Windows Start glyph shape, not its RGB shading:
+  // Explorer changes the glyph/background tint as hover/UIA state settles.
+  // Requiring pixel-identical color incorrectly rejected a restored native glyph.
+  public static int CountGlyphMaskDifferences(string aPath, string bPath) {
+    using (Bitmap a = new Bitmap(aPath))
+    using (Bitmap b = new Bitmap(bPath)) {
+      if (a.Width != b.Width || a.Height != b.Height)
+        throw new InvalidOperationException("Screenshot dimensions changed");
+      int count = 0;
+      int x0 = a.Width / 5, x1 = a.Width * 4 / 5;
+      int y0 = Math.Max(0, a.Height - 48);
+      for (int y = y0; y < a.Height; ++y) {
+        for (int x = x0; x < x1; ++x) {
+          Color ca = a.GetPixel(x, y), cb = b.GetPixel(x, y);
+          bool ma = (ca.B > ca.R + 65 && ca.B > ca.G + 35 && ca.G > ca.R + 55);
+          bool mb = (cb.B > cb.R + 65 && cb.B > cb.G + 35 && cb.G > cb.R + 55);
+          if (ma != mb) ++count;
+        }
+      }
+      return count;
+    }
+  }
 }
 '@
   $baseline='C:\OEM\tap-baseline.png'
@@ -395,16 +418,16 @@ public static class TAPTaskbarVisualDiff {
     $stopped='C:\OEM\tap-cycle-'+$number+'-stopped.png'
     Check ((Test-Path -LiteralPath $active) -and (Test-Path -LiteralPath $stopped)) ('Missing cycle screenshots '+$number)
     $activeDiff=[TAPTaskbarVisualDiff]::CountChanged($active,$stopped,25)
-    $restoredDiff=[TAPTaskbarVisualDiff]::CountChanged($baseline,$stopped,25)
+    $restoredDiff=[TAPTaskbarVisualDiff]::CountGlyphMaskDifferences($baseline,$stopped)
     $case['TaskbarActiveVsStoppedChangedPixels']=$activeDiff
-    $case['TaskbarStoppedVsBaselineChangedPixels']=$restoredDiff
+    $case['TaskbarStoppedVsBaselineGlyphMaskChanges']=$restoredDiff
     Publish ('VISUAL_CYCLE_'+$number+'_MEASURED')
     if($case['EnableStartButton'] -eq 1) {
       Check ($activeDiff -ge 350) ('Enabled Start button was not visibly replaced: cycle '+$number)
     } else {
       Check ($activeDiff -le 60) ('Disabled cycle unexpectedly changed Start button: cycle '+$number)
     }
-    Check ($restoredDiff -le 60) ('Taskbar Start glyph did not visually restore after cycle '+$number)
+    Check ($restoredDiff -le 20) ('Taskbar Start glyph shape did not restore after cycle '+$number)
   }
   Publish 'VISUAL_START_BUTTON_RESTORATION_PASSED'
   $log=Join-Path $env:LOCALAPPDATA 'OpenShell\StartupLog.txt'
