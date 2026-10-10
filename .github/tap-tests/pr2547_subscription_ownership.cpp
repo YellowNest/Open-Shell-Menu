@@ -18,7 +18,7 @@ class MockVisual final : public IVisualTreeService {
 public:
     std::atomic<ULONG> refs{1};
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
-    std::atomic<bool> failAdvise{false};
+    std::atomic<bool> failAdvise{false}, failUnadvise{false};
     bool blockFirst = true;
     bool entered = false, proceed = false;
     std::mutex mutex;
@@ -61,6 +61,7 @@ public:
     HRESULT STDMETHODCALLTYPE UnadviseVisualTreeChange(IVisualTreeServiceCallback* cb) override {
         ++unadviseCalls;
         std::lock_guard<std::mutex> lock(mutex);
+        if (failUnadvise) return E_FAIL;
         if (callback != cb) return E_INVALIDARG;
         callback->Release();
         callback = nullptr;
@@ -148,6 +149,26 @@ int main() {
     Check(service->live == 0, "successor unsubscribed");
     failed->Release();
     successor->Release();
+
+    // An unsuccessful Unadvise must preserve the original owner until retry.
+    IObjectWithSite* retained = newTap();
+    IObjectWithSite* contender = newTap();
+    start(FALSE, FALSE);
+    Check(SUCCEEDED(retained->SetSite(service)), "retained TAP registered");
+    int callsBefore = service->adviseCalls;
+    service->failUnadvise = true;
+    stop();
+    Check(service->live == 1, "callback remains registered after failed Unadvise");
+    start(FALSE, FALSE);
+    Check(contender->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+          "competitor rejected while failed Unadvise retains owner");
+    Check(service->adviseCalls == callsBefore, "failed Unadvise cannot create second callback");
+    service->failUnadvise = false;
+    stop();
+    Check(service->live == 0, "later Unadvise releases retained callback");
+    retained->Release();
+    contender->Release();
+
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
