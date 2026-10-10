@@ -1,0 +1,92 @@
+name: PR2547 Maintainer Fix Validation
+permissions:
+  contents: read
+on:
+  push:
+    branches: [review/pr2547-maintainer-20261010]
+    paths:
+      - 'Src/**'
+      - '.github/tap-tests/**'
+      - '.github/workflows/pr2547-maintainer-validation.yml'
+  workflow_dispatch:
+jobs:
+  cxx-x64-com:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, toolset: v143, host: x64, label: native-server-x64}
+          - {runner: windows-11-arm, toolset: v145, host: arm64, label: win11-x64-emulated}
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build patched Open-Shell x64 binaries
+        shell: pwsh
+        env:
+          TOOLSET: ${{ matrix.toolset }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          if(-not $vs){throw 'MSBuild unavailable'}
+          $msbuild=Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Restore' '/p:RestorePackagesConfig=true' '/verbosity:minimal' '/nologo'
+          if($LASTEXITCODE -ne 0){throw "Restore failed ($LASTEXITCODE)"}
+          & $msbuild 'Src\OpenShell.sln' '/m' '/t:Rebuild' '/p:Configuration=Setup' '/p:Platform=x64' "/p:PlatformToolset=$env:TOOLSET" '/verbosity:minimal' '/nologo'
+          if($LASTEXITCODE -ne 0){throw "Patched x64 source compile failed ($LASTEXITCODE)"}
+          Write-Host 'PASS: patched source compiles with current toolchain'
+      - name: Verify COM activation, repeated shutdown and unload in 400 cycles
+        shell: pwsh
+        env:
+          HOST: ${{ matrix.host }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=(& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          $devcmd=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $exe=Join-Path $env:RUNNER_TEMP 'tap_lifetime_x64.exe'
+          $cmd='call "'+$devcmd+'" -arch=x64 -host_arch='+$env:HOST+' >nul && cl.exe /nologo /EHsc /W4 /std:c++17 ".github\tap-tests\tap_com_smoke.cpp" /Fe:"'+$exe+'" /link ole32.lib user32.lib'
+          & cmd.exe /d /c $cmd
+          if($LASTEXITCODE -ne 0){throw "Cannot compile COM harness ($LASTEXITCODE)"}
+          $dll=Get-ChildItem (Join-Path $PWD 'build\bin') -Recurse -Filter 'StartMenuHelper64.dll' -File | Select-Object -First 1 -ExpandProperty FullName
+          if(-not $dll){throw 'No patched x64 helper DLL found'}
+          & $exe $dll
+          if($LASTEXITCODE -ne 0){throw "400-cycle TAP test failed ($LASTEXITCODE)"}
+          Write-Host 'PASS: 400 x64 COM lifecycle tests for this exact source branch'
+  package:
+    name: Package modified x64 installer
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build exact current branch installer, setup, archives
+        shell: cmd
+        env:
+          CS_VERSION: 4.4.202
+        run: |
+          call Src\Setup\BuildBinaries.bat
+          if errorlevel 1 exit /b 1
+          call Src\Setup\_BuildEnglish.bat
+          if errorlevel 1 exit /b 1
+          call Src\Setup\BuildArchives.bat
+          if errorlevel 1 exit /b 1
+      - name: Verify unsigned installer is a PE file
+        shell: pwsh
+        run: |
+          $exe=Get-ChildItem Src\Setup\Final -Filter 'OpenShellSetup*.exe' -File | Select-Object -First 1
+          if(-not $exe -or $exe.Length -lt 3000000){throw 'Installer not produced'}
+          $hash=Get-FileHash -Algorithm SHA256 $exe.FullName
+          Write-Host "INSTALLER_PATH=$($exe.FullName)"
+          Write-Host "INSTALLER_SHA256=$($hash.Hash)"
+          Write-Host "INSTALLER_BYTES=$($exe.Length)"
+      - name: Publish unsigned exact-branch installer for isolated VM
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr2547-review-native-win11-setup
+          path: Src/Setup/Final/OpenShellSetup*.exe
+          archive: false
+          retention-days: 7
