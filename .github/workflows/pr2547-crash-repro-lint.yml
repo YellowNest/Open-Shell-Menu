@@ -1,0 +1,37 @@
+name: PR2547 Crash Reproducer Syntax Validation
+permissions:
+  contents: read
+on:
+  push:
+    branches: [review/pr2547-maintainer-20261010]
+    paths:
+      - '.github/tap-tests/win11_native_x64_crash_repro.ps1'
+      - '.github/workflows/pr2547-crash-repro-lint.yml'
+jobs:
+  parse-and-compile:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Windows PowerShell 5.1 + PowerShell 7 AST and Win32 P/Invoke C#
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $file=(Resolve-Path '.github/tap-tests/win11_native_x64_crash_repro.ps1').Path
+          $tokens=$null;$errors=$null
+          [Management.Automation.Language.Parser]::ParseFile($file,[ref]$tokens,[ref]$errors)|Out-Null
+          if($errors.Count){$errors|ForEach-Object{Write-Host $_.ToString()};throw 'PowerShell 7 parse failure'}
+          Write-Host 'PASS: PS7 AST'
+          $escaped=$file.Replace("'","''")
+          $code='$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile('+"'"+$escaped+"'"+',[ref]$t,[ref]$e)|Out-Null;if($e.Count){$e|ForEach-Object{Write-Host $_.ToString()};exit 1}else{Write-Host "PASS: PS5.1 AST"}'
+          & powershell.exe -NoProfile -NonInteractive -Command $code
+          if($LASTEXITCODE -ne 0){throw "Windows PowerShell 5.1 parse failure: $LASTEXITCODE"}
+          $source=[IO.File]::ReadAllText($file)
+          $m=[regex]::Match($source, "(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+          if(-not $m.Success){throw 'C# shell probe source absent'}
+          Add-Type -TypeDefinition $m.Groups[1].Value -ErrorAction Stop
+          Write-Host 'PASS: Win32 P/Invoke C# Add-Type compile'
+          foreach($marker in @('WER_CRASH_DUMPS_ENABLED','SETTINGS_DIALOG_','SIXTEEN_LIFECYCLES_COMPLETE','CollectDumps','XAML_LOG_BOUNDED_READ')){
+            if(-not $source.Contains($marker)){throw "Missing coverage marker: $marker"}
+          }
+          Write-Host 'PASS: crash evidence/test instrumentation present'
