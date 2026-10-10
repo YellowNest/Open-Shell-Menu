@@ -63,7 +63,9 @@ int wmain(int argc, wchar_t* argv[])
         IObjectWithSite* site = nullptr;
         hr = factory->CreateInstance(nullptr, IID_IObjectWithSite, reinterpret_cast<void**>(&site));
         if (FAILED(hr) || !site) return fail(L"CreateInstance(IObjectWithSite)", hr);
-        if (!FindTapWindow()) return fail(L"constructor did not create HWND", E_FAIL);
+        // The upstream TAP creates the message-only window only after a
+        // valid XAML site has been assigned and Advise succeeds.
+        if (FindTapWindow()) return fail(L"constructor created HWND before SetSite", E_FAIL);
 
         IUnknown* currentSite = nullptr;
         hr = site->GetSite(IID_IUnknown, reinterpret_cast<void**>(&currentSite));
