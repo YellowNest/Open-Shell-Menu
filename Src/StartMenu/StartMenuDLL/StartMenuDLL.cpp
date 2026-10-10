@@ -2644,7 +2644,10 @@ void UpdateTaskBars( TUpdateTaskbar update )
 		InvalidateRect(taskBar.taskBar,NULL,TRUE);
 		PostMessage(taskBar.taskBar,WM_THEMECHANGED,0,0);
 	}
-	UpdateWin11StartButtonMonitor();
+	// TASKBAR_CLEAR is part of shutdown; do not re-activate the XAML TAP
+	// while teardown is already in progress.
+	if (update!=TASKBAR_CLEAR)
+		UpdateWin11StartButtonMonitor();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
