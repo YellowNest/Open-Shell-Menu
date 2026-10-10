@@ -27,9 +27,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           for ($attempt = 0; $attempt -lt 90; ++$attempt) {
-            $response = gh api 'repos/Open-Shell/Open-Shell-Menu/actions/runs/38086314019/artifacts' |
+            $response = gh api 'repos/Open-Shell/Open-Shell-Menu/actions/runs/38086514063/artifacts' |
               ConvertFrom-Json
-            if ($response.artifacts.name -contains 'OpenShellSetup_4_4_202-pr-1712e1c.exe') {
+            if ($response.artifacts.name -contains 'OpenShellSetup_4_4_202-pr-5d83158.exe') {
               Write-Output 'Exact upstream installer is available'
               exit 0
             }
@@ -39,8 +39,8 @@ jobs:
       - name: Get installer from exact upstream PR commit
         uses: actions/download-artifact@v8
         with:
-          name: OpenShellSetup_4_4_202-pr-1712e1c.exe
-          run-id: 38086314019
+          name: OpenShellSetup_4_4_202-pr-5d83158.exe
+          run-id: 38086514063
           repository: Open-Shell/Open-Shell-Menu
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/tap-installer
