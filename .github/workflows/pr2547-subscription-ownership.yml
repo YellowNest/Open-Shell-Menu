@@ -1,0 +1,59 @@
+name: PR2547 TAP Subscription Ownership Integration
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  push:
+    branches:
+      - review/pr2547-maintainer-20261010
+    paths:
+      - '.github/workflows/pr2547-subscription-ownership.yml'
+      - '.github/tap-tests/pr2547_subscription_ownership.cpp'
+
+jobs:
+  native-tap-com-test:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: review/pr2547-maintainer-20261010
+      - name: Get installer from exact upstream PR commit
+        uses: actions/download-artifact@v8
+        with:
+          name: OpenShellSetup_4_4_202-pr-2bf09c8.exe
+          run-id: 38083009253
+          repository: Open-Shell/Open-Shell-Menu
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/tap-installer
+      - name: Install exact upstream PR build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem -Path '${{ runner.temp }}\tap-installer' -Filter 'OpenShellSetup*.exe' |
+            Select-Object -First 1
+          if (!$installer) { throw 'Matching PR installer missing' }
+          $bytes = [System.IO.File]::ReadAllBytes($installer.FullName)
+          if ($bytes.Length -lt 3000000 -or $bytes[0] -ne 77 -or $bytes[1] -ne 90) {
+            throw 'Unexpected installer contents'
+          }
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          Write-Output "SOURCE_INSTALLER_SHA256=$hash"
+          $p = Start-Process -FilePath $installer.FullName -ArgumentList '/qn NOSTART=1 REBOOT=ReallySuppress' -Wait -PassThru
+          if ($p.ExitCode -notin @(0,3010)) { throw "Installer returned $($p.ExitCode)" }
+          if (!(Test-Path "$env:windir\System32\StartMenuHelper64.dll")) {
+            throw 'StartMenuHelper64.dll was not installed'
+          }
+      - name: Compile and execute direct TAP COM contention test
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%V in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do @set "VSPATH=%%V"
+          if not defined VSPATH exit /b 2
+          call "%VSPATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b 3
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 .github\tap-tests\pr2547_subscription_ownership.cpp /Fe:subscription_ownership.exe ole32.lib uuid.lib
+          if errorlevel 1 exit /b 4
+          subscription_ownership.exe
+          if errorlevel 1 exit /b 5
