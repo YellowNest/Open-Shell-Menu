@@ -58,7 +58,7 @@ struct StartElement
 };
 
 class CWin11StartButtonTap;
-static CComPtr<CWin11StartButtonTap> &PublishedTap( void );
+static CComPtr<CWin11StartButtonTap> g_Tap;
 static std::shared_mutex g_TapMutex;
 
 static bool ContainsText( const CString &text, const wchar_t *part )
@@ -144,8 +144,8 @@ public:
 		CComPtr<CWin11StartButtonTap> oldTap;
 		{
 			std::unique_lock lock(g_TapMutex);
-			if (PublishedTap().p == this)
-				oldTap.Attach(PublishedTap().Detach());
+			if (g_Tap.p == this)
+				oldTap.Attach(g_Tap.Detach());
 		}
 
 		if (!site)
@@ -172,8 +172,8 @@ public:
 			active = g_StartButtonActive;
 			if (active)
 			{
-				replacedTap.Attach(PublishedTap().Detach());
-				PublishedTap() = this;
+				replacedTap.Attach(g_Tap.Detach());
+				g_Tap = this;
 			}
 			else
 				g_ConnectStarted = false;
@@ -196,8 +196,8 @@ public:
 				CComPtr<CWin11StartButtonTap> releasedTap;
 				{
 					std::unique_lock lock(g_TapMutex);
-					if (PublishedTap().p == this)
-						releasedTap.Attach(PublishedTap().Detach());
+					if (g_Tap.p == this)
+						releasedTap.Attach(g_Tap.Detach());
 					g_ConnectStarted = false;
 				}
 			}
@@ -293,9 +293,9 @@ public:
 			if (SUCCEEDED(hr))
 			{
 				std::unique_lock tapLock(g_TapMutex);
-				if (!g_StartButtonActive && PublishedTap().p == this)
+				if (!g_StartButtonActive && g_Tap.p == this)
 				{
-					releasedTap.Attach(PublishedTap().Detach());
+					releasedTap.Attach(g_Tap.Detach());
 					g_ConnectStarted = false;
 				}
 			}
@@ -891,16 +891,10 @@ private:
 	std::unordered_map<InstanceHandle, StartElement> m_Elements;
 };
 
-static CComPtr<CWin11StartButtonTap> &PublishedTap( void )
-{
-	static CComPtr<CWin11StartButtonTap> tap;
-	return tap;
-}
-
 static CComPtr<CWin11StartButtonTap> GetTapRef( void )
 {
 	std::shared_lock lock(g_TapMutex);
-	return PublishedTap();
+	return g_Tap;
 }
 
 class CStartButtonTapFactory: public IClassFactory
@@ -960,55 +954,49 @@ HRESULT GetWin11StartButtonTapClassObject( REFCLSID clsid, REFIID riid, LPVOID *
 
 typedef HRESULT (WINAPI *InitXamlDiagnosticsEx_t)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR );
 
-static DWORD FinishConnectThread( HMODULE moduleReference, HMODULE runtime, bool connected )
-{
-	if (runtime)
-		FreeLibrary(runtime);
-	if (!connected)
-		g_ConnectStarted = false;
-
-	// Keep a private StartMenuHelper reference while this worker is running.
-	// Release it atomically with thread termination so a failed diagnostics
-	// connection cannot unload the helper underneath the worker's return path.
-	FreeLibraryAndExitThread(moduleReference, 0);
-	return 0;
-}
-
 static DWORD WINAPI ConnectThread( LPVOID param )
 {
 	HMODULE moduleReference = (HMODULE)param;
-	HMODULE runtime = LoadLibraryEx(L"Windows.UI.Xaml.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-	if (!runtime)
-		return FinishConnectThread(moduleReference, NULL, false);
-
-	InitXamlDiagnosticsEx_t init = (InitXamlDiagnosticsEx_t)GetProcAddress(runtime, "InitializeXamlDiagnosticsEx");
-	if (!init)
-		return FinishConnectThread(moduleReference, runtime, false);
-
-	HMODULE module = GetThisModule();
-	wchar_t dllPath[MAX_PATH];
-	if (!module || !GetModuleFileName(module, dllPath, _countof(dllPath)))
-		return FinishConnectThread(moduleReference, runtime, false);
-
-	const wchar_t *endpoints[] = { L"VisualDiagConnection1", L"VisualDiagConnection2" };
 	HRESULT last = E_FAIL;
-	for (int retry = 0; retry < 8 && g_StartButtonActive; retry++)
+	HMODULE runtime = LoadLibraryEx(L"Windows.UI.Xaml.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (runtime)
 	{
-		for (int i = 0; i < _countof(endpoints); i++)
+		InitXamlDiagnosticsEx_t init =
+			(InitXamlDiagnosticsEx_t)GetProcAddress(runtime, "InitializeXamlDiagnosticsEx");
+		if (init)
 		{
-			last = init(endpoints[i], GetCurrentProcessId(), NULL,
-				dllPath, CLSID_OpenShellStartButtonTap, NULL);
-			if (SUCCEEDED(last))
+			HMODULE module = GetThisModule();
+			wchar_t dllPath[MAX_PATH];
+			DWORD length = module ? GetModuleFileName(module, dllPath, _countof(dllPath)) : 0;
+			if (length && length < _countof(dllPath))
 			{
-				LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoints[i]);
-				return FinishConnectThread(moduleReference, runtime, true);
+				// Each attempt gets its own endpoint, as in UWPSpy/TranslucentTB.
+				// Reusing an endpoint name can collide with a previous session.
+				for (int retry = 0; retry < 8 && g_StartButtonActive && FAILED(last); retry++)
+				{
+					wchar_t endpoint[48];
+					swprintf_s(endpoint, _countof(endpoint), L"VisualDiagConnection%d", retry + 1);
+					last = init(endpoint, GetCurrentProcessId(), NULL,
+						dllPath, CLSID_OpenShellStartButtonTap, NULL);
+					if (SUCCEEDED(last))
+						LogToFile(STARTUP_LOG, L"Win11StartButton: connected using %s", endpoint);
+					else if (retry < 7 && g_StartButtonActive)
+						Sleep(500);
+				}
 			}
 		}
-		Sleep(500);
+		FreeLibrary(runtime);
 	}
 
-	LogToFile(STARTUP_LOG, L"Win11StartButton: connection failed 0x%08X", last);
-	return FinishConnectThread(moduleReference, runtime, false);
+	if (FAILED(last))
+	{
+		g_ConnectStarted = false;
+		LogToFile(STARTUP_LOG, L"Win11StartButton: connection failed 0x%08X", last);
+	}
+
+	// The worker releases its self-reference atomically with thread exit.
+	FreeLibraryAndExitThread(moduleReference, 0);
+	return 0;
 }
 
 static void EnsureConnection( void )
@@ -1073,7 +1061,7 @@ extern "C" void StopWin11StartButtonTap( void )
 		// Serialize stop with SetSite publishing the global TAP pointer.
 		std::unique_lock lock(g_TapMutex);
 		g_StartButtonActive = false;
-		tap = PublishedTap();
+		tap = g_Tap;
 	}
 	if (tap)
 	{
