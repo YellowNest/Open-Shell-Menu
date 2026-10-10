@@ -1,0 +1,224 @@
+name: PR2547 Native Windows 11 x64 Shutdown Guard Stress
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  push:
+    branches:
+      - review/pr2547-maintainer-20261010
+    paths:
+      - '.github/workflows/pr2547-native-win11-shutdown-guard.yml'
+      - '.github/tap-tests/win11_native_x64_stress.ps1'
+      - '.github/tap-tests/install.bat'
+
+jobs:
+  native-win11-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Check out isolated test scripts
+        uses: actions/checkout@v4
+        with:
+          ref: review/pr2547-maintainer-20261010
+
+      - name: Verify hardware virtualization and stage unattended guest scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          import fcntl, os
+          if os.uname().machine != 'x86_64':
+              raise SystemExit('BLOCKED: host is not native x64')
+          fd = os.open('/dev/kvm', os.O_RDWR)
+          try:
+              v = fcntl.ioctl(fd, 0xAE00)
+              if v != 12: raise SystemExit('BLOCKED: KVM API unsupported')
+              print('PASS: KVM_API_VERSION=12, host=x86_64')
+          finally:
+              os.close(fd)
+          PY
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
+          cp .github/tap-tests/install.bat "$ROOT/oem/"
+          cp .github/tap-tests/win11_native_x64_crash_repro.ps1 "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "NOSTART=1" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "ExplorerPidContinuity" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "LogStartup" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "INTERACTIVE_DESKTOP_VERIFIED" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "CRASH_AUDIT_RUNNING" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "WER_CRASH_DUMPS_ENABLED" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "SIXTEEN_LIFECYCLES_COMPLETE" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "SettingsDialogsObserved" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "XAML_CONNECTION_AND_LOGS_VERIFIED" "$ROOT/oem/win11_native_x64_stress.ps1"
+          grep -Fq "WWAHost" "$ROOT/oem/win11_native_x64_stress.ps1"
+          echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
+
+      - name: Wait for matching review-branch unsigned installer artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for n in $(seq 1 70); do
+            artifacts=$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/38064428813/artifacts" --jq '.artifacts[].name' || true)
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-review.exe"; then
+              echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
+              exit 0
+            fi
+            echo "ARTIFACT_WAIT_CHECK=$n"
+            sleep 15
+          done
+          echo "ERROR: exact review-branch installer never published"
+          exit 4
+
+      - name: Fetch raw v7 installer with compatible v8 download action
+        uses: actions/download-artifact@v8
+        with:
+          name: OpenShellSetup_4_4_202-pr-review.exe
+          run-id: 38064428813
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/win11-native-x64/shared
+      - name: Verify exact source installer and publish guest integrity manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/win11-native-x64/shared"
+          candidate=$(find "$ROOT" -maxdepth 1 -type f -name 'OpenShellSetup*.exe' | head -n 1)
+          test -n "$candidate"
+          test -s "$candidate"
+          file "$candidate"
+          python3 - "$candidate" <<'PY'
+          import pathlib,sys
+          path=pathlib.Path(sys.argv[1])
+          assert path.stat().st_size > 3000000, 'Installer file too small'
+          assert path.open('rb').read(2)==b'MZ','Installer not a PE executable'
+          PY
+          DEST="$ROOT/OpenShellSetup_4_4_202.exe"
+          if test "$candidate" != "$DEST"; then mv "$candidate" "$DEST"; fi
+          sha256sum "$DEST" | awk '{print $1}' > "$ROOT/installer.sha256"
+          echo "EXACT_BRANCH_INSTALLER_SHA=$(cat "$ROOT/installer.sha256")"
+          echo 'VALIDATED_PATCHED_REVIEW_INSTALLER_READY=yes'
+
+      - name: Install native x64 Windows 11 inside nested QEMU-KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          sudo docker pull dockurr/windows:latest
+          PASS=$(openssl rand -hex 16)
+          sudo docker run -d --name openshell-win11-native-x64 \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -p 127.0.0.1:8006:8006 \
+            -e VERSION=11 -e RAM_SIZE=7G -e CPU_CORES=4 \
+            -e DISK_SIZE=64G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
+            -e LOG=Y \
+            -v "$ROOT/storage:/storage" -v "$ROOT/oem:/oem" -v "$ROOT/shared:/shared" \
+            dockurr/windows:latest
+          echo 'NATIVE_X64_VM_CONTAINER_STARTED'
+          found=0
+          last_stage="NONE"
+          for n in $(seq 1 136); do
+            if test -s "$ROOT/shared/win11-native-x64-proof.json"; then
+              state=$(python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json,sys
+          try:
+              with open(sys.argv[1],encoding='utf-8-sig') as f: j=json.load(f)
+              stage=j.get('Stage','UNKNOWN')
+              done=str(j.get('Terminal') is True).lower()
+              print(stage+'|'+done)
+          except (OSError,ValueError): print('INCOMPLETE|false')
+          PY
+              )
+              stage="$(printf '%s' "$state" | cut -d'|' -f1)"
+              terminal="$(printf '%s' "$state" | cut -d'|' -f2)"
+              if test "$stage" != "$last_stage"; then
+                echo "GUEST_STAGE=$stage TERMINAL=$terminal"
+                last_stage="$stage"
+              fi
+              if test "$terminal" = true; then
+                cp "$ROOT/shared/win11-native-x64-proof.json" "$ROOT/evidence/"
+                echo "GUEST_FINAL_STAGE=$stage"
+                cat "$ROOT/shared/win11-native-x64-proof.json"
+                found=1
+                break
+              fi
+            fi
+            if ! sudo docker inspect -f '{{.State.Running}}' openshell-win11-native-x64 | grep -q true; then
+              echo 'VM_EXITED_BEFORE_REPORT'
+              break
+            fi
+            if (( n % 8 == 0 )); then
+              echo "VM_POLL=$n GUEST_STAGE=$last_stage"
+              sudo docker logs --tail 12 openshell-win11-native-x64 2>&1 || true
+              df -h "$ROOT"
+            fi
+            sleep 15
+          done
+          if test "$found" -eq 0; then
+            echo "NO_FINAL_GUEST_REPORT LAST_STAGE=$last_stage"
+            exit 3
+          fi
+          python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8-sig') as f:
+              result=json.load(f)
+          if result.get('NativeWindows11X64') is not True:
+              raise SystemExit('FAILED: Windows guest not proven native x64 Windows 11')
+          if result.get('ExplorerRunning') is not True:
+              raise SystemExit('FAILED: explorer.exe not proven running')
+          print('PASS: genuine native Windows 11 x64 and explorer.exe observed from inside guest')
+          print('Taskbar:', result.get('TaskbarDetected'))
+          print('Explorer session(s):', [p['SessionId'] for p in result.get('ExplorerProcesses',[])])
+          print('Probe session:', result.get('CurrentSessionId'))
+          assert result.get('Terminal') is True, result
+          assert result.get('Stage') == 'TEST_COMPLETE', result
+          integration=result.get('OpenShellIntegration')
+          assert integration=='SIXTEEN_X64_CYCLES_SETTINGS_AND_WER_VERIFIED', integration
+          assert result.get('InstallerExit') in (0,3010),result
+          cases=result.get('Cycles',[])
+          assert result.get('DesktopGateStableSamples',0)>=3,result
+          assert result.get('DesktopGateHitRootProcess') not in ('WWAHost','LogonUI','CloudExperienceHostBroker','FirstLogonAnim'),result
+          assert len(cases)==16,cases
+          assert all(x.get('Passed') is True and x.get('MenuStopped') is True and x.get('ExplorerAfterStop') is True and x.get('ExplorerPidContinuity') is True for x in cases),cases
+          assert sum(x.get('EnableStartButton')==1 for x in cases)==15,cases
+          assert result.get('WERMinidumpsConfigured') is True,result
+          assert result.get('SettingsRequests')==4 and result.get('SettingsDialogsObserved')==4,result
+          assert result.get('DumpFileCount')==0,result
+          assert all(x.get('HelperLoadedInExplorer') is True for x in cases if x.get('EnableStartButton')==1),cases
+          assert len(result.get('XamlConnectedLogLines',[]))>0,result
+          assert len(result.get('XamlFailureLogLines',[]))==0,result
+          assert len(result.get('CrashOrHangEvents',[]))==0,result
+          print('PASS: 16 native x64 Explorer/Open-Shell lifecycle cycles, 15 with XAML enabled')
+          print('PASS: original Explorer PID survived all 16 cycles and four real Settings dialog opens')
+          print('PASS: helper DLL observed, XAML diagnostics connection reported and no recorded startup/teardown failure')
+          print('LIMITATION: UIAutomation and screenshots are observations, NOT proof of precise XAML property restoration')
+          PY
+
+      - name: Preserve guest VM logs even on failure
+        if: always()
+        shell: bash
+        run: |
+          ROOT="$RUNNER_TEMP/win11-native-x64"
+          mkdir -p "$ROOT/evidence"
+          if sudo docker inspect openshell-win11-native-x64 > /dev/null 2>&1; then
+            sudo docker logs --tail 400 openshell-win11-native-x64 > "$ROOT/evidence/virtual-machine.log" 2>&1 || true
+            sudo docker rm -f openshell-win11-native-x64 > /dev/null 2>&1 || true
+          fi
+          cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.png "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/openshell-startup.txt" "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.dmp "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/openshell-msi.log" "$ROOT/evidence/" 2>/dev/null || true
+          df -h / > "$ROOT/evidence/storage.txt" || true
+          ls -lah "$ROOT/evidence"
+
+      - name: Upload native Windows 11 x64 guest evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr2547-x64-shutdown-guard-16-cycle-evidence
+          path: ${{ runner.temp }}/win11-native-x64/evidence/
+          if-no-files-found: warn
+          retention-days: 7
