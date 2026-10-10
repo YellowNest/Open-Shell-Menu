@@ -2,6 +2,7 @@
 #include <ocidl.h>
 #include <xamlom.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -22,6 +23,7 @@ public:
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
     bool blockFirst = true;
     bool entered = false, proceed = false;
+    bool blockUnadvise = false, unadviseEntered = false, proceedUnadvise = false;
     std::mutex mutex;
     std::condition_variable cv;
     IVisualTreeServiceCallback* callback = nullptr;
@@ -61,7 +63,12 @@ public:
     }
     HRESULT STDMETHODCALLTYPE UnadviseVisualTreeChange(IVisualTreeServiceCallback* cb) override {
         ++unadviseCalls;
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
+        if (blockUnadvise) {
+            unadviseEntered = true;
+            cv.notify_all();
+            cv.wait(lock, [&]{return proceedUnadvise;});
+        }
         if (failUnadvise) return E_FAIL;
         if (callback != cb) return E_INVALIDARG;
         callback->Release();
@@ -77,6 +84,16 @@ public:
     void Resume() {
         std::lock_guard<std::mutex> lock(mutex);
         proceed = true;
+        cv.notify_all();
+    }
+    void WaitUnadvise() {
+        std::unique_lock<std::mutex> lock(mutex);
+        Check(cv.wait_for(lock, std::chrono::seconds(15), [&]{return unadviseEntered;}),
+              "shutdown did not enter Unadvise");
+    }
+    void ResumeUnadvise() {
+        std::lock_guard<std::mutex> lock(mutex);
+        proceedUnadvise = true;
         cv.notify_all();
     }
     HRESULT STDMETHODCALLTYPE GetEnums(unsigned int*, EnumType**) override { return E_NOTIMPL; }
@@ -214,6 +231,59 @@ int main() {
     stop();
     Check(service->live == 0, "successor removed its callback");
     afterBurst->Release();
+
+    // Regression: Start while Stop is inside Unadvise. The old owner must
+    // be unpublished after successful shutdown, even if Start toggled active.
+    IObjectWithSite* raceOwner = newTap();
+    start(FALSE, FALSE);
+    std::mutex gateMutex;
+    std::condition_variable gateCv;
+    bool ownerReady = false, requestStop = false;
+    HRESULT raceSetup = E_FAIL;
+    {
+        std::lock_guard<std::mutex> lock(service->mutex);
+        service->blockUnadvise = true;
+        service->unadviseEntered = false;
+        service->proceedUnadvise = false;
+    }
+    std::thread stopper([&] {
+        raceSetup = raceOwner->SetSite(service);
+        {
+            std::unique_lock<std::mutex> lock(gateMutex);
+            ownerReady = true;
+            gateCv.notify_all();
+            gateCv.wait(lock, [&]{return requestStop;});
+        }
+        stop();  // Same thread that created the dispatch window.
+    });
+    {
+        std::unique_lock<std::mutex> lock(gateMutex);
+        Check(gateCv.wait_for(lock, std::chrono::seconds(15), [&]{return ownerReady;}),
+              "race TAP setup did not complete");
+        Check(SUCCEEDED(raceSetup), "race TAP owner subscribed");
+        requestStop = true;
+    }
+    gateCv.notify_all();
+    service->WaitUnadvise();
+    std::atomic<bool> startEntered{false};
+    std::thread starter([&] {
+        startEntered = true;
+        start(FALSE, FALSE);
+    });
+    while (!startEntered) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    service->ResumeUnadvise();
+    stopper.join();
+    starter.join();
+    Check(service->live == 0, "race shutdown unsubscribed");
+    IObjectWithSite* raceSuccessor = newTap();
+    Check(SUCCEEDED(raceSuccessor->SetSite(service)),
+          "late Start did not strand the old unsubscribed TAP owner");
+    stop();
+    Check(service->live == 0, "race successor unsubscribed");
+    raceSuccessor->Release();
+    raceOwner->Release();
+    service->blockUnadvise = false;
 
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
