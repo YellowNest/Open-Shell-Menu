@@ -265,6 +265,9 @@ public static class ShellProbe {
     $case['MenuStopped']=((ProcessList 'StartMenu').Count -eq 0)
     $case['ExplorerAfterStop']=((ProcessList 'explorer').Count -gt 0)
     $case['ExplorerPidsAfterStop']=@((ProcessList 'explorer')|ForEach-Object Id)
+    $case['ModulesAfterStop']=@(ExplorerModules)
+    $case['HelperStillMappedAfterStop']=($case['ModulesAfterStop'] -contains 'StartMenuHelper64.dll')
+    $case['ExplorerPrivateBytesAfterStop']=@((ProcessList 'explorer')|Measure-Object -Property PrivateMemorySize64 -Sum|ForEach-Object Sum)[0]
     $case['ExplorerPidContinuity']=(@($case['ExplorerPidsBefore']|Where-Object {$case['ExplorerPidsAfterStop'] -contains $_}).Count -gt 0)
     $case['NativeStartUIAAfterStop']=UIAStart
     Screenshot ('tap-cycle-'+$i+'-stopped')
@@ -323,6 +326,9 @@ public static class ShellProbe {
     Start-Sleep -Seconds 18
     $case['ExplorerAfterStop']=((ProcessList 'explorer').Count -gt 0)
     $case['ExplorerPidsAfterStop']=@((ProcessList 'explorer')|ForEach-Object Id)
+    $case['ModulesAfterStop']=@(ExplorerModules)
+    $case['HelperStillMappedAfterStop']=($case['ModulesAfterStop'] -contains 'StartMenuHelper64.dll')
+    $case['ExplorerPrivateBytesAfterStop']=@((ProcessList 'explorer')|Measure-Object -Property PrivateMemorySize64 -Sum|ForEach-Object Sum)[0]
     $case['ExplorerPidContinuity']=(@($case['ExplorerPidsBefore']|Where-Object {$case['ExplorerPidsAfterStop'] -contains $_}).Count -gt 0)
     $case['NativeStartUIAAfterStop']=UIAStart
     Screenshot ('tap-cycle-'+$i+'-stopped')
