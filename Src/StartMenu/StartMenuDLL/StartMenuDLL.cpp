@@ -3291,8 +3291,6 @@ static DWORD WINAPI ExitThreadProc( void *param )
 
 static void CleanStartMenuDLL( void )
 {
-	StopWin11StartButtonMonitor();
-
 	ClearIatHook(g_DwmpBTRHook);
 	g_DwmpBTRHook=NULL;
 	ClearIatHook(g_DwmpTWWRHook);
@@ -3345,6 +3343,9 @@ static void CleanStartMenuDLL( void )
 	}
 	ResetHotCorners();
 	UpdateTaskBars(TASKBAR_CLEAR);
+	// TASKBAR_CLEAR calls UpdateWin11StartButtonMonitor, so stop XAML TAP last.
+	// Otherwise that update can start/re-activate the connection during Exit.
+	StopWin11StartButtonMonitor();
 	g_WinStartButton=NULL;
 	for (id_taskbar_map::const_iterator it=g_TaskbarInfos.begin();it!=g_TaskbarInfos.end();++it)
 	{
