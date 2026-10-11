@@ -34,8 +34,20 @@ public:
     std::mutex mutex;
     std::condition_variable cv;
     IVisualTreeServiceCallback* callback = nullptr;
+    std::atomic<IObjectWithSite*> queryReentrantTap{nullptr};
+    std::atomic<bool> inspectSiteOnUnadvise{false};
+    std::atomic<int> reentrantChecks{0}, unadviseSiteChecks{0};
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** ppv) override {
+        // COM QueryInterface can call into the TAP while SetSite holds its
+        // lifecycle lock; GetSite must not acquire that same lock.
+        if (auto tap = queryReentrantTap.load()) {
+            IUnknown* previous = reinterpret_cast<IUnknown*>(1);
+            HRESULT hr = tap->GetSite(IID_IUnknown, (void**)&previous);
+            Check(hr == E_FAIL && previous == nullptr,
+                  "GetSite reentrancy before SetSite attachment");
+            ++reentrantChecks;
+        }
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
         if (iid != IID_IUnknown && iid != __uuidof(IVisualTreeService)) return E_NOINTERFACE;
@@ -99,6 +111,17 @@ public:
         }
         if (failUnadvise) return E_FAIL;
         if (callback != cb) return E_INVALIDARG;
+        if (inspectSiteOnUnadvise) {
+            IObjectWithSite* owner = nullptr;
+            Check(SUCCEEDED(cb->QueryInterface(IID_IObjectWithSite, (void**)&owner)) && owner,
+                  "Unadvise callback still implements IObjectWithSite");
+            IUnknown* site = nullptr;
+            Check(SUCCEEDED(owner->GetSite(IID_IUnknown, (void**)&site)) && site,
+                  "GetSite works when Unadvise reenters TAP teardown");
+            site->Release();
+            owner->Release();
+            ++unadviseSiteChecks;
+        }
         callback->Release();
         callback = nullptr;
         --live;
@@ -740,6 +763,50 @@ int main() {
     propertyErrors->Release();
     service->replayStart = false;
     update(FALSE, FALSE);
+
+    // COM reentrancy and GetSite snapshot under concurrent final teardown:
+    // callbacks and site QI must never attempt the lifecycle mutex twice.
+    IObjectWithSite* siteRace = newTap();
+    start(FALSE, FALSE);
+    service->queryReentrantTap = siteRace;
+    Check(SUCCEEDED(siteRace->SetSite(service)),
+          "site QueryInterface reentrancy completed without deadlock");
+    service->queryReentrantTap = nullptr;
+    Check(service->reentrantChecks >= 1, "reentrant GetSite was exercised");
+    service->inspectSiteOnUnadvise = true;
+
+    std::atomic<int> successfulReads{0}, emptyReads{0};
+    std::vector<std::thread> readers;
+    for (int thread = 0; thread < 6; ++thread) {
+        readers.emplace_back([&] {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            Check(SUCCEEDED(initialized), "reader apartment initialized");
+            for (int i = 0; i < 3000; ++i) {
+                IUnknown* snapshot = reinterpret_cast<IUnknown*>(1);
+                HRESULT hr = siteRace->GetSite(IID_IUnknown, (void**)&snapshot);
+                if (SUCCEEDED(hr)) {
+                    Check(snapshot != nullptr, "valid site snapshot has COM reference");
+                    snapshot->Release();
+                    ++successfulReads;
+                } else {
+                    Check(snapshot == nullptr, "missing site clears output during teardown");
+                    ++emptyReads;
+                }
+            }
+            CoUninitialize();
+        });
+    }
+    while (successfulReads + emptyReads < 200) std::this_thread::yield();
+    stop();
+    for (auto& reader : readers) reader.join();
+    Check(service->unadviseSiteChecks == 1,
+          "Unadvise successfully reentered GetSite during teardown");
+    Check(service->live == 0, "concurrent site readers left no TAP callback");
+    IUnknown* detached = reinterpret_cast<IUnknown*>(1);
+    Check(FAILED(siteRace->GetSite(IID_IUnknown, (void**)&detached)) && !detached,
+          "GetSite detached after successful Unadvise");
+    siteRace->Release();
+    service->inspectSiteOnUnadvise = false;
 
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
