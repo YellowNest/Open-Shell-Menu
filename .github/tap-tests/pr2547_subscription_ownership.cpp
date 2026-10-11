@@ -808,6 +808,37 @@ int main() {
     siteRace->Release();
     service->inspectSiteOnUnadvise = false;
 
+    // Repeated fresh TAP lifetimes exercise class registration, subscription,
+    // failed Advise/Unadvise and ATL module lock release without a VM restart.
+    constexpr int repeatedCycles = 128;
+    for (int cycle = 0; cycle < repeatedCycles; ++cycle) {
+        IObjectWithSite* cycleTap = newTap();
+        start(FALSE, FALSE);
+        const bool failSubscription = cycle % 29 == 0;
+        service->failAdvise = failSubscription;
+        HRESULT hr = cycleTap->SetSite(service);
+        service->failAdvise = false;
+        if (failSubscription) {
+            Check(FAILED(hr) && service->live == 0,
+                  "failed repeated Advise released callback and reservation");
+        } else {
+            Check(SUCCEEDED(hr) && service->live == 1,
+                  "repeated TAP instance subscribed once");
+            if (cycle % 17 == 0) {
+                service->failUnadvise = true;
+                stop();
+                Check(service->live == 1 && canUnload() == S_FALSE,
+                      "repeated failed Unadvise retained owner");
+                service->failUnadvise = false;
+            }
+        }
+        stop();
+        Check(service->live == 0, "cycle ended with no subscribed callback");
+        cycleTap->Release();
+        Check(service->refs == 1 && canUnload() == S_OK,
+              "cycle released COM site and ATL module references");
+    }
+
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
