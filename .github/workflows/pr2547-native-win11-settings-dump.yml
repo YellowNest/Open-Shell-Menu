@@ -64,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           for n in $(seq 1 70); do
-            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38165370011/artifacts" --jq '.artifacts[].name' || true)
-            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-7d17412.exe"; then
+            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38166845349/artifacts" --jq '.artifacts[].name' || true)
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-20293a2.exe"; then
               echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
               exit 0
             fi
@@ -78,8 +78,8 @@ jobs:
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
         with:
-          name: OpenShellSetup_4_4_202-pr-7d17412.exe
-          run-id: 38165370011
+          name: OpenShellSetup_4_4_202-pr-20293a2.exe
+          run-id: 38166845349
           repository: Open-Shell/Open-Shell-Menu
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/win11-native-x64/shared
