@@ -21,6 +21,8 @@ public:
     std::atomic<ULONG> refs{1};
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
+    std::atomic<bool> replayStart{false}, failClear{false};
+    std::atomic<int> setPropertyCalls{0}, clearPropertyCalls{0};
     bool blockFirst = true;
     bool entered = false, proceed = false;
     bool blockUnadvise = false, unadviseEntered = false, proceedUnadvise = false;
@@ -59,6 +61,17 @@ public:
         int now = ++live;
         int observed = maxLive.load();
         while (observed < now && !maxLive.compare_exchange_weak(observed, now)) {}
+        if (replayStart) {
+            ParentChildRelation relation = {};
+            VisualElement element = {};
+            element.Handle = 101;
+            element.Type = SysAllocString(L"Windows.UI.Xaml.Controls.Primitives.ExperienceToggleButton");
+            element.Name = SysAllocString(L"StartButton");
+            HRESULT replay = cb->OnVisualTreeChange(relation, element, Add);
+            SysFreeString(element.Type);
+            SysFreeString(element.Name);
+            Check(SUCCEEDED(replay), "mock Start control replay accepted");
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE UnadviseVisualTreeChange(IVisualTreeServiceCallback* cb) override {
@@ -97,11 +110,38 @@ public:
         cv.notify_all();
     }
     HRESULT STDMETHODCALLTYPE GetEnums(unsigned int*, EnumType**) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE CreateInstance(BSTR, BSTR, InstanceHandle*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetPropertyValuesChain(InstanceHandle, unsigned int*,
-                  PropertyChainSource**, unsigned int*, PropertyChainValue**) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE SetProperty(InstanceHandle, InstanceHandle, unsigned int) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE ClearProperty(InstanceHandle, unsigned int) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE CreateInstance(BSTR, BSTR, InstanceHandle* created) override {
+        if (!created) return E_POINTER;
+        *created = 102;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPropertyValuesChain(InstanceHandle handle, unsigned int* sourceCount,
+                  PropertyChainSource** sources, unsigned int* valueCount,
+                  PropertyChainValue** values) override {
+        if (!replayStart || handle != 101) return E_NOTIMPL;
+        if (!sourceCount || !sources || !valueCount || !values) return E_POINTER;
+        *sourceCount = 0;
+        *sources = nullptr;
+        *valueCount = 1;
+        *values = static_cast<PropertyChainValue*>(CoTaskMemAlloc(sizeof(PropertyChainValue)));
+        if (!*values) { *valueCount = 0; return E_OUTOFMEMORY; }
+        ZeroMemory(*values, sizeof(PropertyChainValue));
+        (*values)[0].Index = 7;
+        (*values)[0].Type = SysAllocString(L"Boolean");
+        (*values)[0].PropertyName = SysAllocString(L"IsHitTestVisible");
+        if (!(*values)[0].Type || !(*values)[0].PropertyName) return E_OUTOFMEMORY;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetProperty(InstanceHandle handle, InstanceHandle, unsigned int index) override {
+        if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
+        ++setPropertyCalls;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE ClearProperty(InstanceHandle handle, unsigned int index) override {
+        if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
+        ++clearPropertyCalls;
+        return failClear ? E_FAIL : S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetCollectionCount(InstanceHandle, unsigned int*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetCollectionElements(InstanceHandle, unsigned int,
                   unsigned int*, CollectionElementValue**) override { return E_NOTIMPL; }
@@ -113,6 +153,7 @@ public:
 using DllGetClassObjectFn = HRESULT (WINAPI *)(REFCLSID, REFIID, LPVOID*);
 using DllCanUnloadNowFn = HRESULT (WINAPI *)();
 using TapStartFn = void (WINAPI *)(BOOL, BOOL);
+using TapUpdateFn = void (WINAPI *)(BOOL, BOOL);
 using TapStopFn = void (WINAPI *)();
 
 int main() {
@@ -123,8 +164,9 @@ int main() {
     auto getFactory = reinterpret_cast<DllGetClassObjectFn>(GetProcAddress(lib, "DllGetClassObject"));
     auto canUnload = reinterpret_cast<DllCanUnloadNowFn>(GetProcAddress(lib, "DllCanUnloadNow"));
     auto start = reinterpret_cast<TapStartFn>(GetProcAddress(lib, "StartWin11StartButtonTap"));
+    auto update = reinterpret_cast<TapUpdateFn>(GetProcAddress(lib, "UpdateWin11StartButtonTap"));
     auto stop = reinterpret_cast<TapStopFn>(GetProcAddress(lib, "StopWin11StartButtonTap"));
-    Check(getFactory && canUnload && start && stop, "real TAP DLL exports loaded");
+    Check(getFactory && canUnload && start && update && stop, "real TAP DLL exports loaded");
     Check(canUnload() == S_OK, "no ATL object locks before TAP creation");
     IClassFactory* factory = nullptr;
     Check(SUCCEEDED(getFactory(TapClsid, IID_IClassFactory, (void**)&factory)), "TAP factory obtained");
@@ -386,6 +428,36 @@ int main() {
     threadedQuit = true;
     dispatchThread.join();
     threadedOwner->Release();
+
+    // Exercise a real TAP override and a failed synchronous restore.
+    // Failed ClearProperty must retain the callback and its ownership so the
+    // native Start override can be retried instead of being discarded.
+    start(FALSE, FALSE);
+    service->replayStart = true;
+    IObjectWithSite* restoring = newTap();
+    Check(SUCCEEDED(restoring->SetSite(service)), "Start control replay subscribed");
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->setPropertyCalls == 0; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->setPropertyCalls == 1, "Start hit-target override installed");
+    service->failClear = true;
+    stop();
+    Check(service->clearPropertyCalls == 1, "restore was attempted synchronously");
+    Check(service->live == 1, "failed restore retains diagnostics subscription");
+    Check(canUnload() == S_FALSE, "failed restore keeps TAP COM module locked");
+    service->failClear = false;
+    stop();
+    Check(service->clearPropertyCalls == 2, "failed property restore retried");
+    Check(service->live == 0, "successful restore releases subscription");
+    restoring->Release();
+    service->replayStart = false;
+    update(FALSE, FALSE);
 
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
