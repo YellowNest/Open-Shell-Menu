@@ -21,8 +21,9 @@ public:
     std::atomic<ULONG> refs{1};
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
-    std::atomic<bool> replayStart{false}, failClear{false}, failSet{false};
-    std::atomic<bool> propertyOverride{false};
+    std::atomic<bool> replayStart{false}, replayGlyph{false}, failClear{false}, failSet{false};
+    std::atomic<bool> propertyOverride{false}, glyphOverride{false};
+    std::atomic<int> glyphSetCalls{0}, glyphClearCalls{0};
     std::atomic<int> setPropertyCalls{0}, clearPropertyCalls{0};
     bool blockSet = false, setEntered = false, allowSet = false;
     bool blockFirst = true;
@@ -73,6 +74,16 @@ public:
             SysFreeString(element.Type);
             SysFreeString(element.Name);
             Check(SUCCEEDED(replay), "mock Start control replay accepted");
+            if (replayGlyph) {
+                relation.Parent = 101;
+                element.Handle = 103;
+                element.Type = SysAllocString(L"Windows.UI.Xaml.Controls.FontIcon");
+                element.Name = SysAllocString(L"Icon");
+                HRESULT glyphReplay = cb->OnVisualTreeChange(relation, element, Add);
+                SysFreeString(element.Type);
+                SysFreeString(element.Name);
+                Check(SUCCEEDED(glyphReplay), "Start glyph replay accepted");
+            }
         }
         return S_OK;
     }
@@ -120,7 +131,8 @@ public:
     HRESULT STDMETHODCALLTYPE GetPropertyValuesChain(InstanceHandle handle, unsigned int* sourceCount,
                   PropertyChainSource** sources, unsigned int* valueCount,
                   PropertyChainValue** values) override {
-        if (!replayStart || handle != 101) return E_NOTIMPL;
+        if (!replayStart || (handle != 101 && (!replayGlyph || handle != 103)))
+            return E_NOTIMPL;
         if (!sourceCount || !sources || !valueCount || !values) return E_POINTER;
         *sourceCount = 0;
         *sources = nullptr;
@@ -128,13 +140,19 @@ public:
         *values = static_cast<PropertyChainValue*>(CoTaskMemAlloc(sizeof(PropertyChainValue)));
         if (!*values) { *valueCount = 0; return E_OUTOFMEMORY; }
         ZeroMemory(*values, sizeof(PropertyChainValue));
-        (*values)[0].Index = 7;
-        (*values)[0].Type = SysAllocString(L"Boolean");
-        (*values)[0].PropertyName = SysAllocString(L"IsHitTestVisible");
+        (*values)[0].Index = handle == 103 ? 8 : 7;
+        (*values)[0].Type = SysAllocString(handle == 103 ? L"Visibility" : L"Boolean");
+        (*values)[0].PropertyName = SysAllocString(
+            handle == 103 ? L"Visibility" : L"IsHitTestVisible");
         if (!(*values)[0].Type || !(*values)[0].PropertyName) return E_OUTOFMEMORY;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetProperty(InstanceHandle handle, InstanceHandle, unsigned int index) override {
+        if (replayGlyph && handle == 103 && index == 8) {
+            ++glyphSetCalls;
+            glyphOverride = true;
+            return S_OK;
+        }
         if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
         ++setPropertyCalls;
         std::unique_lock<std::mutex> lock(mutex);
@@ -148,6 +166,11 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE ClearProperty(InstanceHandle handle, unsigned int index) override {
+        if (replayGlyph && handle == 103 && index == 8) {
+            ++glyphClearCalls;
+            glyphOverride = false;
+            return S_OK;
+        }
         if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
         ++clearPropertyCalls;
         if (failClear) return E_FAIL;
@@ -606,6 +629,36 @@ int main() {
           "only successfully applied override cleared on Stop");
     Check(service->live == 0, "SetProperty retry owner unsubscribed");
     failedSetter->Release();
+    service->replayStart = false;
+    update(FALSE, FALSE);
+
+    // Verify the Start glyph's parent walk uses the same ancestry logic
+    // as XAML-event classification: hide only the descendant, then restore.
+    service->replayStart = true;
+    service->replayGlyph = true;
+    IObjectWithSite* glyphTap = newTap();
+    start(FALSE, FALSE);
+    Check(SUCCEEDED(glyphTap->SetSite(service)), "Start glyph replay subscribed");
+    const int glyphSets = service->glyphSetCalls;
+    const int glyphClears = service->glyphClearCalls;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->glyphSetCalls == glyphSets; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->glyphSetCalls == glyphSets + 1, "descendant Start glyph hidden");
+    Check(service->glyphOverride, "Start glyph visibility override recorded");
+    stop();
+    Check(service->glyphClearCalls == glyphClears + 1,
+          "descendant Start glyph restored exactly once");
+    Check(!service->glyphOverride, "glyph visibility restored");
+    Check(service->live == 0, "glyph TAP released subscription");
+    glyphTap->Release();
+    service->replayGlyph = false;
     service->replayStart = false;
     update(FALSE, FALSE);
 
