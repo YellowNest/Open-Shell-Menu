@@ -69,7 +69,7 @@ jobs:
           if not defined VSPATH exit /b 2
           call "%VSPATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
           if errorlevel 1 exit /b 3
-          cl /nologo /std:c++17 /EHsc /W4 /utf-8 .github\tap-tests\pr2547_subscription_ownership.cpp /Fe:subscription_ownership.exe ole32.lib uuid.lib
+          cl /nologo /std:c++17 /EHsc /W4 /utf-8 .github\tap-tests\pr2547_subscription_ownership.cpp /Fe:subscription_ownership.exe ole32.lib uuid.lib user32.lib
           if errorlevel 1 exit /b 4
           subscription_ownership.exe
           if errorlevel 1 exit /b 5
