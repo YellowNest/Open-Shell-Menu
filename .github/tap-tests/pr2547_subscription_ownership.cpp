@@ -22,7 +22,7 @@ public:
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
     std::atomic<bool> replayStart{false}, replayGlyph{false}, failClear{false}, failSet{false};
-    std::atomic<bool> failCreate{false}, readOnly{false};
+    std::atomic<bool> failCreate{false}, failPropertyLookup{false}, readOnly{false};
     std::atomic<bool> propertyOverride{false}, glyphOverride{false};
     std::atomic<int> createInstanceCalls{0};
     std::atomic<int> glyphSetCalls{0}, glyphClearCalls{0};
@@ -137,6 +137,7 @@ public:
                   PropertyChainValue** values) override {
         if (!replayStart || (handle != 101 && (!replayGlyph || handle != 103)))
             return E_NOTIMPL;
+        if (failPropertyLookup) return E_FAIL;
         if (!sourceCount || !sources || !valueCount || !values) return E_POINTER;
         *sourceCount = 0;
         *sources = nullptr;
@@ -670,13 +671,28 @@ int main() {
     // Property metadata and XAML object creation can reject an override.
     // Neither failure may mark the native Start control as modified.
     service->replayStart = true;
-    service->readOnly = true;
+    service->failPropertyLookup = true;
     IObjectWithSite* propertyErrors = newTap();
     start(FALSE, FALSE);
     Check(SUCCEEDED(propertyErrors->SetSite(service)), "metadata fault TAP subscribed");
     const int previousCreates = service->createInstanceCalls;
     const int previousSets = service->setPropertyCalls;
     const int previousClears = service->clearPropertyCalls;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 40; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(2);
+    }
+    Check(service->createInstanceCalls == previousCreates,
+          "failed property lookup cannot create a XAML value");
+    Check(service->setPropertyCalls == previousSets && !service->propertyOverride,
+          "failed property lookup cannot mark Start as hidden");
+    service->failPropertyLookup = false;
+    service->readOnly = true;
     update(TRUE, FALSE);
     for (int i = 0; i < 40; ++i) {
         MSG msg;
