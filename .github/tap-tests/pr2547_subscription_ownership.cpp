@@ -296,6 +296,14 @@ int main() {
     queriedSite->Release();
     Check(siteOwner->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED),
           "second non-null SetSite rejected");
+    service->failUnadvise = true;
+    Check(FAILED(siteOwner->SetSite(nullptr)), "SetSite(nullptr) reports failed Unadvise");
+    Check(service->live == 1, "failed null-site detach retains callback");
+    IObjectWithSite* blockedAfterDetach = newTap();
+    Check(blockedAfterDetach->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+          "failed null-site detach retains exclusive TAP owner");
+    blockedAfterDetach->Release();
+    service->failUnadvise = false;
     Check(SUCCEEDED(siteOwner->SetSite(nullptr)), "SetSite(nullptr) detached site");
     Check(service->live == 0, "SetSite(nullptr) removed the subscription");
     queriedSite = reinterpret_cast<IUnknown*>(1);
