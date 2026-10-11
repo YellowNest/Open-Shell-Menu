@@ -22,7 +22,9 @@ public:
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
     std::atomic<bool> replayStart{false}, replayGlyph{false}, failClear{false}, failSet{false};
+    std::atomic<bool> failCreate{false}, readOnly{false};
     std::atomic<bool> propertyOverride{false}, glyphOverride{false};
+    std::atomic<int> createInstanceCalls{0};
     std::atomic<int> glyphSetCalls{0}, glyphClearCalls{0};
     std::atomic<int> setPropertyCalls{0}, clearPropertyCalls{0};
     bool blockSet = false, setEntered = false, allowSet = false;
@@ -124,6 +126,8 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetEnums(unsigned int*, EnumType**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE CreateInstance(BSTR, BSTR, InstanceHandle* created) override {
+        ++createInstanceCalls;
+        if (failCreate) return E_FAIL;
         if (!created) return E_POINTER;
         *created = 102;
         return S_OK;
@@ -141,6 +145,7 @@ public:
         if (!*values) { *valueCount = 0; return E_OUTOFMEMORY; }
         ZeroMemory(*values, sizeof(PropertyChainValue));
         (*values)[0].Index = handle == 103 ? 8 : 7;
+        (*values)[0].MetadataBits = readOnly ? 0x2 : 0;
         (*values)[0].Type = SysAllocString(handle == 103 ? L"Visibility" : L"Boolean");
         (*values)[0].PropertyName = SysAllocString(
             handle == 103 ? L"Visibility" : L"IsHitTestVisible");
@@ -659,6 +664,64 @@ int main() {
     Check(service->live == 0, "glyph TAP released subscription");
     glyphTap->Release();
     service->replayGlyph = false;
+    service->replayStart = false;
+    update(FALSE, FALSE);
+
+    // Property metadata and XAML object creation can reject an override.
+    // Neither failure may mark the native Start control as modified.
+    service->replayStart = true;
+    service->readOnly = true;
+    IObjectWithSite* propertyErrors = newTap();
+    start(FALSE, FALSE);
+    Check(SUCCEEDED(propertyErrors->SetSite(service)), "metadata fault TAP subscribed");
+    const int previousCreates = service->createInstanceCalls;
+    const int previousSets = service->setPropertyCalls;
+    const int previousClears = service->clearPropertyCalls;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 40; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(2);
+    }
+    Check(service->createInstanceCalls == previousCreates,
+          "read-only property never reaches CreateInstance");
+    Check(service->setPropertyCalls == previousSets && !service->propertyOverride,
+          "read-only property is not overridden");
+    service->readOnly = false;
+    service->failCreate = true;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->createInstanceCalls == previousCreates; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->createInstanceCalls == previousCreates + 1,
+          "CreateInstance failure was exercised");
+    Check(service->setPropertyCalls == previousSets && !service->propertyOverride,
+          "failed instance creation did not write Start property");
+    service->failCreate = false;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->setPropertyCalls == previousSets; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->setPropertyCalls == previousSets + 1 && service->propertyOverride,
+          "property change retries after metadata and creation failures");
+    stop();
+    Check(!service->propertyOverride && service->clearPropertyCalls == previousClears + 1,
+          "only successfully installed property is restored");
+    Check(service->live == 0, "metadata fault TAP unsubscribed");
+    propertyErrors->Release();
     service->replayStart = false;
     update(FALSE, FALSE);
 
