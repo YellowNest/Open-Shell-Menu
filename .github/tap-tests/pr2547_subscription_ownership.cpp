@@ -324,6 +324,41 @@ int main() {
     siteOwner->Release();
     afterDetach->Release();
 
+    // The dispatch HWND belongs to its creating thread, not the thread
+    // calling Stop. Pump that thread's queue while Stop tears the TAP down.
+    IObjectWithSite* threadedOwner = newTap();
+    start(FALSE, FALSE);
+    std::atomic<bool> threadedReady{false}, threadedQuit{false};
+    std::atomic<HRESULT> threadedAttach{E_FAIL};
+    std::atomic<DWORD> dispatchThreadId{0};
+    std::thread dispatchThread([&] {
+        dispatchThreadId = GetCurrentThreadId();
+        threadedAttach = threadedOwner->SetSite(service);
+        threadedReady = true;
+        while (!threadedQuit) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            Sleep(1);
+        }
+    });
+    while (!threadedReady) std::this_thread::yield();
+    Check(SUCCEEDED(threadedAttach), "worker-thread TAP attached");
+    HWND otherThreadDispatch = FindWindowExW(
+        HWND_MESSAGE, nullptr, L"OpenShell.Win11StartButtonTap", nullptr);
+    Check(otherThreadDispatch != nullptr, "worker dispatch created");
+    Check(GetWindowThreadProcessId(otherThreadDispatch, nullptr) == dispatchThreadId,
+          "dispatch window owned by worker thread");
+    Check(dispatchThreadId != GetCurrentThreadId(), "Stop runs on a different thread");
+    stop();
+    Check(service->live == 0, "cross-thread Stop unregisters subscription");
+    Check(!IsWindow(otherThreadDispatch), "cross-thread Stop destroys dispatch HWND");
+    threadedQuit = true;
+    dispatchThread.join();
+    threadedOwner->Release();
+
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
