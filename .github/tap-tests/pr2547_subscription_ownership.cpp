@@ -285,6 +285,31 @@ int main() {
     raceOwner->Release();
     service->blockUnadvise = false;
 
+    // SetSite(nullptr) must use the same teardown as Stop: no stale
+    // subscription or published TAP owner may survive detachment.
+    IObjectWithSite* siteOwner = newTap();
+    start(FALSE, FALSE);
+    Check(SUCCEEDED(siteOwner->SetSite(service)), "SetSite attached diagnostics site");
+    IUnknown* queriedSite = nullptr;
+    Check(SUCCEEDED(siteOwner->GetSite(IID_IUnknown, (void**)&queriedSite)) && queriedSite,
+          "GetSite exposes attached COM site");
+    queriedSite->Release();
+    Check(siteOwner->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED),
+          "second non-null SetSite rejected");
+    Check(SUCCEEDED(siteOwner->SetSite(nullptr)), "SetSite(nullptr) detached site");
+    Check(service->live == 0, "SetSite(nullptr) removed the subscription");
+    queriedSite = reinterpret_cast<IUnknown*>(1);
+    Check(FAILED(siteOwner->GetSite(IID_IUnknown, (void**)&queriedSite)) && !queriedSite,
+          "GetSite returns no site after detachment");
+    IObjectWithSite* afterDetach = newTap();
+    Check(SUCCEEDED(afterDetach->SetSite(service)),
+          "new TAP can attach after SetSite(nullptr)");
+    Check(service->live == 1, "one subscription after site replacement");
+    stop();
+    Check(service->live == 0, "replacement TAP unsubscribed on Stop");
+    siteOwner->Release();
+    afterDetach->Release();
+
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
