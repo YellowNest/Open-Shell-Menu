@@ -111,6 +111,7 @@ public:
 };
 
 using DllGetClassObjectFn = HRESULT (WINAPI *)(REFCLSID, REFIID, LPVOID*);
+using DllCanUnloadNowFn = HRESULT (WINAPI *)();
 using TapStartFn = void (WINAPI *)(BOOL, BOOL);
 using TapStopFn = void (WINAPI *)();
 
@@ -120,9 +121,11 @@ int main() {
     HMODULE lib = LoadLibraryExW(L"StartMenuHelper64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     Check(lib != nullptr, "StartMenuHelper64 loads");
     auto getFactory = reinterpret_cast<DllGetClassObjectFn>(GetProcAddress(lib, "DllGetClassObject"));
+    auto canUnload = reinterpret_cast<DllCanUnloadNowFn>(GetProcAddress(lib, "DllCanUnloadNow"));
     auto start = reinterpret_cast<TapStartFn>(GetProcAddress(lib, "StartWin11StartButtonTap"));
     auto stop = reinterpret_cast<TapStopFn>(GetProcAddress(lib, "StopWin11StartButtonTap"));
-    Check(getFactory && start && stop, "real TAP DLL exports loaded");
+    Check(getFactory && canUnload && start && stop, "real TAP DLL exports loaded");
+    Check(canUnload() == S_OK, "no ATL object locks before TAP creation");
     IClassFactory* factory = nullptr;
     Check(SUCCEEDED(getFactory(TapClsid, IID_IClassFactory, (void**)&factory)), "TAP factory obtained");
     auto newTap = [&] {
@@ -134,6 +137,7 @@ int main() {
     auto* service = new MockVisual;
     IObjectWithSite* a = newTap();
     IObjectWithSite* b = newTap();
+    Check(canUnload() == S_FALSE, "live TAP prevents COM module unload");
     start(FALSE, FALSE); // Enable the session without launching diagnostics worker.
     HRESULT firstResult = E_FAIL;
     std::thread first([&] { firstResult = a->SetSite(service); });
@@ -179,6 +183,7 @@ int main() {
     service->failUnadvise = true;
     stop();
     Check(service->live == 1, "callback remains registered after failed Unadvise");
+    Check(canUnload() == S_FALSE, "failed Unadvise holds module lock");
     start(FALSE, FALSE);
     Check(contender->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
           "competitor rejected while failed Unadvise retains owner");
@@ -364,6 +369,9 @@ int main() {
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
+    Check(canUnload() == S_OK, "all test-owned TAP module locks released");
+    // DllCanUnloadNow checks COM object locks, not references retained
+    // by the OS loader or by XAML diagnostics in Explorer.
     FreeLibrary(lib);
     CoUninitialize();
     std::cout << "PASS: real TAP DLL prevents dual subscriptions; fault rollback and COM references verified" << std::endl;
