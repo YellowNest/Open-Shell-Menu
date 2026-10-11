@@ -159,6 +159,8 @@ int main() {
     service->failAdvise = true;
     start(FALSE, FALSE);
     Check(FAILED(failed->SetSite(service)), "injected Advise failure observed");
+    Check(FindWindowExW(HWND_MESSAGE, nullptr, L"OpenShell.Win11StartButtonTap", nullptr) == nullptr,
+          "failed Advise rolls back its dispatch window");
     service->failAdvise = false;
     Check(SUCCEEDED(successor->SetSite(service)), "successor accepts released reservation");
     Check(service->live == 1 && service->maxLive == 1,
