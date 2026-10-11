@@ -22,7 +22,9 @@ public:
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
     std::atomic<bool> replayStart{false}, failClear{false};
+    std::atomic<bool> propertyOverride{false};
     std::atomic<int> setPropertyCalls{0}, clearPropertyCalls{0};
+    bool blockSet = false, setEntered = false, allowSet = false;
     bool blockFirst = true;
     bool entered = false, proceed = false;
     bool blockUnadvise = false, unadviseEntered = false, proceedUnadvise = false;
@@ -135,12 +137,31 @@ public:
     HRESULT STDMETHODCALLTYPE SetProperty(InstanceHandle handle, InstanceHandle, unsigned int index) override {
         if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
         ++setPropertyCalls;
+        std::unique_lock<std::mutex> lock(mutex);
+        if (blockSet) {
+            setEntered = true;
+            cv.notify_all();
+            cv.wait(lock, [&]{ return allowSet; });
+        }
+        propertyOverride = true;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE ClearProperty(InstanceHandle handle, unsigned int index) override {
         if (!replayStart || handle != 101 || index != 7) return E_INVALIDARG;
         ++clearPropertyCalls;
-        return failClear ? E_FAIL : S_OK;
+        if (failClear) return E_FAIL;
+        propertyOverride = false;
+        return S_OK;
+    }
+    void WaitSetEntered() {
+        std::unique_lock<std::mutex> lock(mutex);
+        Check(cv.wait_for(lock, std::chrono::seconds(15), [&]{return setEntered;}),
+              "blocked SetProperty never started");
+    }
+    void ResumeSet() {
+        std::lock_guard<std::mutex> lock(mutex);
+        allowSet = true;
+        cv.notify_all();
     }
     HRESULT STDMETHODCALLTYPE GetCollectionCount(InstanceHandle, unsigned int*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetCollectionElements(InstanceHandle, unsigned int,
@@ -457,6 +478,53 @@ int main() {
     Check(service->live == 0, "successful restore releases subscription");
     restoring->Release();
     service->replayStart = false;
+    update(FALSE, FALSE);
+
+    // Stop must serialize a synchronous restore behind any in-flight UI
+    // thread property setter, including when the override flag is not yet set.
+    service->replayStart = true;
+    {
+        std::lock_guard<std::mutex> lock(service->mutex);
+        service->blockSet = true;
+        service->setEntered = false;
+        service->allowSet = false;
+    }
+    const int clearsBeforeRace = service->clearPropertyCalls;
+    IObjectWithSite* inFlight = newTap();
+    start(FALSE, FALSE);
+    std::atomic<bool> uiReady{false}, uiQuit{false};
+    std::atomic<HRESULT> uiAttached{E_FAIL};
+    std::thread ui([&] {
+        uiAttached = inFlight->SetSite(service);
+        uiReady = true;
+        while (!uiQuit) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            Sleep(1);
+        }
+    });
+    while (!uiReady) std::this_thread::yield();
+    Check(SUCCEEDED(uiAttached), "in-flight TAP registered on UI thread");
+    update(TRUE, FALSE);
+    service->WaitSetEntered();
+    std::thread concurrentStop([&]{ stop(); });
+    // On the broken path Stop passes HasOverrides while SetProperty is
+    // blocked. On the fixed path its synchronous restore waits for the UI.
+    Sleep(100);
+    service->ResumeSet();
+    concurrentStop.join();
+    Check(!service->propertyOverride, "in-flight Start override restored after Stop");
+    Check(service->clearPropertyCalls > clearsBeforeRace,
+          "in-flight Start override had a matching ClearProperty");
+    Check(service->live == 0, "in-flight owner unsubscribed after restore");
+    uiQuit = true;
+    ui.join();
+    inFlight->Release();
+    service->replayStart = false;
+    service->blockSet = false;
     update(FALSE, FALSE);
 
     Check(service->refs == 1, "all service COM references balanced");
