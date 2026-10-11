@@ -527,6 +527,46 @@ int main() {
     service->blockSet = false;
     update(FALSE, FALSE);
 
+    // A temporarily non-pumping window must time out rather than hang
+    // Explorer, and TAP ownership must remain recoverable for a later Stop.
+    IObjectWithSite* stalled = newTap();
+    start(FALSE, FALSE);
+    std::atomic<bool> stalledReady{false}, allowPump{false}, stalledQuit{false};
+    std::atomic<HRESULT> stalledAttach{E_FAIL};
+    std::thread stalledThread([&] {
+        stalledAttach = stalled->SetSite(service);
+        stalledReady = true;
+        while (!stalledQuit) {
+            if (allowPump) {
+                MSG msg;
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            Sleep(1);
+        }
+    });
+    while (!stalledReady) std::this_thread::yield();
+    Check(SUCCEEDED(stalledAttach), "stalled-window TAP registered");
+    const auto stopBegin = std::chrono::steady_clock::now();
+    stop();
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopBegin).count();
+    Check(elapsedMs < 8000, "stalled dispatch Stop timeout is bounded");
+    Check(service->live == 1, "timeout retains subscribed TAP");
+    IObjectWithSite* stalledCompetitor = newTap();
+    start(FALSE, FALSE);
+    Check(stalledCompetitor->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+          "stalled dispatch owner blocks competing TAP");
+    stalledCompetitor->Release();
+    allowPump = true;
+    stop();
+    Check(service->live == 0, "responsive dispatch permits retry cleanup");
+    stalledQuit = true;
+    stalledThread.join();
+    stalled->Release();
+
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
     factory->Release();
