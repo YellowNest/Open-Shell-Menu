@@ -290,6 +290,10 @@ int main() {
     IObjectWithSite* siteOwner = newTap();
     start(FALSE, FALSE);
     Check(SUCCEEDED(siteOwner->SetSite(service)), "SetSite attached diagnostics site");
+    HWND dispatch = FindWindowExW(HWND_MESSAGE, nullptr, L"OpenShell.Win11StartButtonTap", nullptr);
+    Check(dispatch != nullptr, "dispatch window exists after site attach");
+    Check(GetWindowThreadProcessId(dispatch, nullptr) == GetCurrentThreadId(),
+          "dispatch belongs to site attachment thread");
     IUnknown* queriedSite = nullptr;
     Check(SUCCEEDED(siteOwner->GetSite(IID_IUnknown, (void**)&queriedSite)) && queriedSite,
           "GetSite exposes attached COM site");
@@ -299,6 +303,7 @@ int main() {
     service->failUnadvise = true;
     Check(FAILED(siteOwner->SetSite(nullptr)), "SetSite(nullptr) reports failed Unadvise");
     Check(service->live == 1, "failed null-site detach retains callback");
+    Check(IsWindow(dispatch), "failed Unadvise retains dispatch for retry");
     IObjectWithSite* blockedAfterDetach = newTap();
     Check(blockedAfterDetach->SetSite(service) == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
           "failed null-site detach retains exclusive TAP owner");
@@ -306,6 +311,7 @@ int main() {
     service->failUnadvise = false;
     Check(SUCCEEDED(siteOwner->SetSite(nullptr)), "SetSite(nullptr) detached site");
     Check(service->live == 0, "SetSite(nullptr) removed the subscription");
+    Check(!IsWindow(dispatch), "successful detachment destroys dispatch window");
     queriedSite = reinterpret_cast<IUnknown*>(1);
     Check(FAILED(siteOwner->GetSite(IID_IUnknown, (void**)&queriedSite)) && !queriedSite,
           "GetSite returns no site after detachment");
