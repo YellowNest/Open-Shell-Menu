@@ -1,0 +1,68 @@
+name: PR2547 Source Quality Gate
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/pr2547-maintainer-20261010
+    paths:
+      - '.github/workflows/pr2547-source-quality.yml'
+  workflow_dispatch:
+
+jobs:
+  check-diff-and-lifetimes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact upstream PR revision
+        uses: actions/checkout@v4
+        with:
+          repository: Open-Shell/Open-Shell-Menu
+          ref: 20293a22a859dcc23255f81eb5011d8c45bce31d
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check patch whitespace and changed-file scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch -q origin master
+          BASE="$(git merge-base origin/master HEAD)"
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "BASE=$BASE"
+          git diff --check "$BASE" HEAD
+          git diff --stat "$BASE" HEAD
+          COUNT="$(git diff --name-only "$BASE" HEAD | wc -l)"
+          test "$COUNT" -eq 12
+          test "$(git diff --name-only "$BASE" HEAD | grep -c 'Win11StartButtonTap.cpp')" -eq 1
+          echo 'PASS: clean 12-file upstream PR diff'
+      - name: Inspect TAP lifetime invariants and source consistency
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          tap = Path('Src/StartMenu/StartMenuHelper/Win11StartButtonTap.cpp').read_text(encoding='utf-8-sig')
+          bridge = Path('Src/StartMenu/StartMenuDLL/Win11StartButton.cpp').read_text(encoding='utf-8-sig')
+          dll = Path('Src/StartMenu/StartMenuDLL/StartMenuDLL.cpp').read_text(encoding='utf-8-sig')
+
+          checks = {
+              'single global TAP ownership mutex': 'static std::mutex g_TapMutex;' in tap,
+              'no retired connection flag': 'g_ConnectStarted' not in tap,
+              'no duplicate ancestry function': 'IsUnderStartButtonLocked' not in tap,
+              'unified ancestry lookup': tap.count('FindStartAncestorLocked(') >= 2,
+              'only one subscription call site': tap.count('->AdviseVisualTreeChange(') == 1,
+              'callback unregistered on stop': '->UnadviseVisualTreeChange(' in tap,
+              'bounded synchronous dispatch': 'SendMessageTimeout(' in tap,
+              'XAML restoration serialized': 'RequestApply(true, false)' in tap,
+              'thread releases its own reference': 'FreeLibraryAndExitThread(moduleReference, 0);' in tap,
+              'no forced unload of diagnostics module': 'FreeLibrary(GetThisModule())' not in tap,
+              'bridge explicitly releases loader ref': 'FreeLibrary(g_StartButtonTapModule);' in bridge,
+              'original taskbar cleanup remains': 'TASKBAR_CLEAR' in dll,
+          }
+          for label, ok in checks.items():
+              print(('PASS' if ok else 'FAIL') + ': ' + label)
+          if not all(checks.values()):
+              raise SystemExit(1)
+          PY
