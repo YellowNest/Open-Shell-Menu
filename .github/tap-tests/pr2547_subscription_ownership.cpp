@@ -135,6 +135,27 @@ int main() {
         return tap;
     };
     auto* service = new MockVisual;
+
+    // A COM site without IVisualTreeService is rejected without claiming
+    // TAP ownership, which must remain available to the next valid site.
+    IStream* unsupported = nullptr;
+    Check(SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &unsupported)),
+          "create COM site without visual tree interface");
+    IObjectWithSite* rejected = newTap();
+    start(FALSE, FALSE);
+    Check(rejected->GetSite(IID_IUnknown, nullptr) == E_POINTER,
+          "GetSite rejects a null result pointer");
+    IUnknown* missingSite = reinterpret_cast<IUnknown*>(1);
+    Check(FAILED(rejected->GetSite(IID_IUnknown, (void**)&missingSite)) && !missingSite,
+          "GetSite clears output when no site has been attached");
+    Check(rejected->SetSite(unsupported) == E_NOINTERFACE,
+          "unsupported diagnostics site rejected");
+    Check(service->adviseCalls == 0 && service->live == 0,
+          "unsupported site never registers callback");
+    stop();
+    unsupported->Release();
+    rejected->Release();
+
     IObjectWithSite* a = newTap();
     IObjectWithSite* b = newTap();
     Check(canUnload() == S_FALSE, "live TAP prevents COM module unload");
