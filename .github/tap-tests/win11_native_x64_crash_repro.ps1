@@ -358,6 +358,26 @@ public static class ShellProbe {
     Publish ('EXTENDED_CYCLE_'+$i+'_PASSED')
   }
   Publish 'SIXTEEN_LIFECYCLES_COMPLETE'
+  # Observe Windows loader retention after Open-Shell has exited. This is
+  # diagnostic evidence only: DllCanUnloadNow cannot prove OS loader unload.
+  Check ((ProcessList 'StartMenu').Count -eq 0) 'Unload observation requires stopped Open-Shell'
+  $samples=[System.Collections.Generic.List[object]]::new()
+  $state['DllUnloadTimeline']=@()
+  $previous=0
+  foreach($elapsed in @(0,10,30,60,120,180)) {
+    if($elapsed -gt $previous) {Start-Sleep -Seconds ($elapsed-$previous)}
+    $names=@(ExplorerModules)
+    $samples.Add([ordered]@{
+      SecondsAfterExit=$elapsed
+      HelperStillMapped=($names -contains 'StartMenuHelper64.dll')
+      ExplorerAlive=((ProcessList 'explorer').Count -gt 0)
+      ExplorerPIDs=@((ProcessList 'explorer')|ForEach-Object Id)
+    })
+    $state['DllUnloadTimeline']=@($samples.ToArray())
+    Publish ('DLL_UNLOAD_OBSERVATION_'+$elapsed)
+    $previous=$elapsed
+  }
+  Publish 'DLL_UNLOAD_OBSERVATIONS_COMPLETE'
   # Compare the rendered Windows 11 taskbar in native x64 screenshots.
   # The disabled cycle must remain unchanged; each enabled cycle must replace
   # the native Start glyph and restore the same baseline when stopped.
