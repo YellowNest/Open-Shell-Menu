@@ -21,7 +21,7 @@ public:
     std::atomic<ULONG> refs{1};
     std::atomic<int> adviseCalls{0}, unadviseCalls{0}, live{0}, maxLive{0};
     std::atomic<bool> failAdvise{false}, failUnadvise{false};
-    std::atomic<bool> replayStart{false}, failClear{false};
+    std::atomic<bool> replayStart{false}, failClear{false}, failSet{false};
     std::atomic<bool> propertyOverride{false};
     std::atomic<int> setPropertyCalls{0}, clearPropertyCalls{0};
     bool blockSet = false, setEntered = false, allowSet = false;
@@ -143,6 +143,7 @@ public:
             cv.notify_all();
             cv.wait(lock, [&]{ return allowSet; });
         }
+        if (failSet) return E_FAIL;
         propertyOverride = true;
         return S_OK;
     }
@@ -566,6 +567,47 @@ int main() {
     stalledQuit = true;
     stalledThread.join();
     stalled->Release();
+
+    // A failed SetProperty must never be recorded as installed. A later
+    // update retries the same property, then Stop clears it exactly once.
+    service->replayStart = true;
+    service->failSet = true;
+    IObjectWithSite* failedSetter = newTap();
+    start(FALSE, FALSE);
+    Check(SUCCEEDED(failedSetter->SetSite(service)), "SetProperty fault owner attached");
+    const int setsBeforeFailure = service->setPropertyCalls;
+    const int clearsBeforeFailure = service->clearPropertyCalls;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->setPropertyCalls == setsBeforeFailure; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->setPropertyCalls == setsBeforeFailure + 1, "faulted SetProperty attempted");
+    Check(!service->propertyOverride, "failed SetProperty did not install override");
+    service->failSet = false;
+    update(TRUE, FALSE);
+    for (int i = 0; i < 100 && service->setPropertyCalls == setsBeforeFailure + 1; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    }
+    Check(service->setPropertyCalls == setsBeforeFailure + 2, "failed SetProperty retried");
+    Check(service->propertyOverride, "second SetProperty succeeded");
+    stop();
+    Check(!service->propertyOverride, "successful retry restored on Stop");
+    Check(service->clearPropertyCalls == clearsBeforeFailure + 1,
+          "only successfully applied override cleared on Stop");
+    Check(service->live == 0, "SetProperty retry owner unsubscribed");
+    failedSetter->Release();
+    service->replayStart = false;
+    update(FALSE, FALSE);
 
     Check(service->refs == 1, "all service COM references balanced");
     service->Release();
