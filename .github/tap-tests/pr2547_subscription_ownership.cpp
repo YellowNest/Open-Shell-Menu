@@ -370,9 +370,14 @@ int main() {
     service->Release();
     factory->Release();
     Check(canUnload() == S_OK, "all test-owned TAP module locks released");
-    // DllCanUnloadNow checks COM object locks, not references retained
-    // by the OS loader or by XAML diagnostics in Explorer.
-    FreeLibrary(lib);
+    // DllCanUnloadNow checks COM object locks, not the OS loader.
+    // Here only the test process explicitly loaded the module; unlike
+    // Explorer, no XAML diagnostics injection owns an extra loader ref.
+    Check(GetModuleHandleW(L"StartMenuHelper64.dll") == lib,
+          "test host has expected module mapping");
+    Check(FreeLibrary(lib) != 0, "test host releases its loader reference");
+    Check(GetModuleHandleW(L"StartMenuHelper64.dll") == nullptr,
+          "test host physically unloads TAP DLL without diagnostics injection");
     CoUninitialize();
     std::cout << "PASS: real TAP DLL prevents dual subscriptions; fault rollback and COM references verified" << std::endl;
     return 0;
