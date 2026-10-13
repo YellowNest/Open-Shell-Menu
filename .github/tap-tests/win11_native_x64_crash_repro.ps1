@@ -92,7 +92,7 @@ function CollectDumps {
 
 # Observe actual input routing through the real layered Start button HWND.
 # The probes are diagnostic only. They do not claim XAML property-level proof.
-function ClickProbe([string]$button) {
+function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$true) {
   $result=[ordered]@{Button=$button;Dispatched=$false;OpenShellMenuVisible=$false;ContextPopupVisible=$false}
   $h=[ShellProbe]::FindWindow('OpenShell.CStartButton',$null)
   $result['ButtonWindowFound']=($h -ne [IntPtr]::Zero)
@@ -120,21 +120,33 @@ function ClickProbe([string]$button) {
   Start-Sleep -Milliseconds 700
   $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
   $result['OpenShellMenuVisible']=($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu))
-  $popupCount=0
+  $popupWindows=[System.Collections.Generic.List[string]]::new()
   $cb=[ShellProbe+EnumWindowProc]{
     param($hwnd,$unused)
     if(-not [ShellProbe]::IsWindowVisible($hwnd)){return $true}
     $name=[System.Text.StringBuilder]::new(128)
     $null=[ShellProbe]::GetClassName($hwnd,$name,128)
-    if($name.ToString() -eq '#32768'){$popupCount++}
+    if($name.ToString() -eq '#32768'){$popupWindows.Add([string]$hwnd)}
     return $true
   }
   $null=[ShellProbe]::EnumWindows($cb,[IntPtr]::Zero)
-  $result['ContextPopupVisible']=($popupCount -gt 0)
-  Screenshot ('tap-real-'+$button+'-click')
-  [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
-  [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
-  Start-Sleep -Milliseconds 350
+  $result['ContextPopupVisible']=($popupWindows.Count -gt 0)
+  $result['ContextPopupWindows']=@($popupWindows.ToArray())
+  $pt.X=$x+70
+  $pt.Y=$y-95
+  $popupHit=[ShellProbe]::WindowFromPoint($pt)
+  $popupClass=[System.Text.StringBuilder]::new(128)
+  if($popupHit -ne [IntPtr]::Zero){$null=[ShellProbe]::GetClassName($popupHit,$popupClass,128)}
+  $result['AboveButtonHitClass']=$popupClass.ToString()
+  $result['AboveButtonHitWindow']=[string]$popupHit
+  $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
+  $result['SettingsVisible']=($settings -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($settings))
+  Screenshot ('tap-real-'+$label+'-click')
+  if($dismissAfter){
+    [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
+    [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 350
+  }
   return $result
 }
 function Screenshot([string]$label) {
@@ -369,9 +381,25 @@ public static class ShellProbe {
     Start-Sleep -Seconds 2
     Screenshot ('tap-cycle-'+$i+'-active')
     if($i -eq 5) {
-      $case['LeftClickProbe']=ClickProbe 'left'
-      $case['RightClickProbe']=ClickProbe 'right'
-      Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
+      # A clean Windows installation may display initial Settings on first Start click.
+      # Confirm the default settings before testing normal left/right input.
+      $case['FirstLeftClickProbe']=ClickProbe 'left' 'first-left' $false
+      if($case['FirstLeftClickProbe']['SettingsVisible']){
+        $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
+        if($settings -ne [IntPtr]::Zero){
+          $case['FirstRunSettingsOKPosted']=[ShellProbe]::PostMessage($settings,0x0111,[IntPtr]1,[IntPtr]::Zero)
+          Start-Sleep -Seconds 2
+          $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
+          $case['FirstRunSettingsDismissed']=($settings -eq [IntPtr]::Zero -or -not [ShellProbe]::IsWindowVisible($settings))
+        }
+      }
+      if($case['FirstLeftClickProbe']['SettingsVisible'] -and -not $case['FirstRunSettingsDismissed']){
+        Publish 'FIRST_RUN_SETTINGS_BLOCKS_CLICK_VERIFICATION'
+      }else{
+        $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
+        $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
+        Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
+      }
     }
     if(($i % 3) -eq 0){
       $state['SettingsRequests']++
