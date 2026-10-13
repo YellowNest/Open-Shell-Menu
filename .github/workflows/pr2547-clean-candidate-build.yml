@@ -1,0 +1,56 @@
+name: PR2547 clean candidate build
+
+on:
+  push:
+    branches:
+      - review/pr2547-ci-clean-ge0rdi-20261013
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out the exact review candidate
+        uses: actions/checkout@v6
+        with:
+          ref: 715a6633550522e975db33febcccfacc11bf2d83
+          fetch-depth: 0
+
+      - name: Verify candidate SHA and derive version
+        shell: pwsh
+        run: |
+          $expected = '715a6633550522e975db33febcccfacc11bf2d83'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $expected) { throw "Wrong source revision: $actual" }
+          git diff-tree --no-commit-id --name-only -r HEAD
+          git diff HEAD^ HEAD --check
+          if ($LASTEXITCODE -ne 0) { throw 'Source whitespace check failed' }
+          $tag = (git describe --tags --abbrev=0 2>$null).Trim()
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Unexpected version tag: $tag" }
+          $v = [version]$tag.Substring(1)
+          $version = "$($v.Major).$($v.Minor).$($v.Build + 1)"
+          "CS_VERSION=$version" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "Exact source revision: $actual"
+          Write-Host "Build version: $version"
+
+      - name: Build binaries
+        shell: cmd
+        run: Src\Setup\BuildBinaries.bat
+
+      - name: Build installers
+        shell: cmd
+        run: Src\Setup\_BuildEnglish.bat
+
+      - name: Build setup and symbols
+        shell: cmd
+        run: Src\Setup\BuildArchives.bat
+
+      - name: Publish unsigned candidate installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr2547-clean-candidate-installer
+          path: Src/Setup/Final/OpenShellSetup*.exe
+          if-no-files-found: error
+          retention-days: 7
