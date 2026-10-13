@@ -7,7 +7,7 @@ permissions:
 on:
   push:
     branches:
-      - review/pr2547-maintainer-20261010
+      - review/pr2547-atl-native-win11-20261013
     paths:
       - '.github/workflows/pr2547-native-win11-settings-dump.yml'
       - '.github/tap-tests/win11_native_x64_stress.ps1'
@@ -22,7 +22,7 @@ jobs:
       - name: Check out isolated test scripts
         uses: actions/checkout@v4
         with:
-          ref: review/pr2547-maintainer-20261010
+          ref: review/pr2547-atl-native-win11-20261013
 
       - name: Verify hardware virtualization and stage unattended guest scripts
         shell: bash
@@ -57,15 +57,18 @@ jobs:
           grep -Fq "WWAHost" "$ROOT/oem/win11_native_x64_stress.ps1"
           echo "Staged controlled XAML stress script with logging before installer and PID continuity assertions"
 
-      - name: Wait for exact upstream PR unsigned installer artifact
+      - name: Verify pinned ATL source revision and matching installer
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          actual=$(gh api 'repos/YellowNest/Open-Shell-Menu/actions/runs/38371444910' --jq '.head_sha')
+          test "$actual" = '8612ef6450a926f2290855f3a8e4b86ac772eb3a' || { echo 'STOP: build run does not match the tested ATL commit'; exit 5; }
+          echo "VERIFIED_INSTALLER_SOURCE_SHA=$actual"
           for n in $(seq 1 70); do
-            artifacts=$(gh api "repos/Open-Shell/Open-Shell-Menu/actions/runs/38166845349/artifacts" --jq '.artifacts[].name' || true)
-            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202-pr-20293a2.exe"; then
+            artifacts=$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/38371444910/artifacts" --jq '.artifacts[].name' || true)
+            if printf '%s\n' "$artifacts" | grep -Fxq "OpenShellSetup_4_4_202.exe"; then
               echo "REVIEW_INSTALLER_ARTIFACT_READY=yes"
               exit 0
             fi
@@ -78,9 +81,9 @@ jobs:
       - name: Fetch raw v7 installer with compatible v8 download action
         uses: actions/download-artifact@v8
         with:
-          name: OpenShellSetup_4_4_202-pr-20293a2.exe
-          run-id: 38166845349
-          repository: Open-Shell/Open-Shell-Menu
+          name: OpenShellSetup_4_4_202.exe
+          run-id: 38371444910
+          repository: YellowNest/Open-Shell-Menu
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/win11-native-x64/shared
       - name: Verify exact source installer and publish guest integrity manifest
@@ -101,7 +104,7 @@ jobs:
           DEST="$ROOT/OpenShellSetup_4_4_202.exe"
           if test "$candidate" != "$DEST"; then mv "$candidate" "$DEST"; fi
           sha256sum "$DEST" | awk '{print $1}' > "$ROOT/installer.sha256"
-          echo "EXACT_UPSTREAM_INSTALLER_SHA=$(cat "$ROOT/installer.sha256")"
+          echo "EXACT_ATL_INSTALLER_SHA=$(cat "$ROOT/installer.sha256")"
           echo 'VALIDATED_PATCHED_REVIEW_INSTALLER_READY=yes'
 
       - name: Install native x64 Windows 11 inside nested QEMU-KVM
