@@ -139,8 +139,10 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   if($popupHit -ne [IntPtr]::Zero){$null=[ShellProbe]::GetClassName($popupHit,$popupClass,128)}
   $result['AboveButtonHitClass']=$popupClass.ToString()
   $result['AboveButtonHitWindow']=[string]$popupHit
-  $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
-  $result['SettingsVisible']=($settings -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($settings))
+  # Reuse the same explorer-owned dialog enumeration already verified for 16 settings opens.
+  $settings=@(OpenShellSettingsWindows)
+  $result['SettingsVisible']=($settings.Count -gt 0)
+  $result['SettingsWindows']=@($settings|ForEach-Object {$_.Title})
   Screenshot ('tap-real-'+$label+'-click')
   if($dismissAfter){
     [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
@@ -384,22 +386,30 @@ public static class ShellProbe {
       # A clean Windows installation may display initial Settings on first Start click.
       # Confirm the default settings before testing normal left/right input.
       $case['FirstLeftClickProbe']=ClickProbe 'left' 'first-left' $false
-      if($case['FirstLeftClickProbe']['SettingsVisible']){
-        $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
-        if($settings -ne [IntPtr]::Zero){
-          $case['FirstRunSettingsOKPosted']=[ShellProbe]::PostMessage($settings,0x0111,[IntPtr]1,[IntPtr]::Zero)
-          Start-Sleep -Seconds 2
-          $settings=[ShellProbe]::FindWindow($null,'Settings for Open-Shell Menu 4.4.202')
-          $case['FirstRunSettingsDismissed']=($settings -eq [IntPtr]::Zero -or -not [ShellProbe]::IsWindowVisible($settings))
+      $firstRunDialogs=@(OpenShellSettingsWindows)
+      $case['FirstRunSettingsDialogs']=@($firstRunDialogs|ForEach-Object {$_.Title})
+      if($firstRunDialogs.Count -gt 0){
+        # IDOK confirms the initial setup; WM_CLOSE does not save first-run selection.
+        $case['FirstRunSettingsOKPosted']=$true
+        foreach($window in $firstRunDialogs){
+          if(-not [ShellProbe]::PostMessage($window.Hwnd,0x0111,[IntPtr]1,[IntPtr]::Zero)){
+            $case['FirstRunSettingsOKPosted']=$false
+          }
         }
+        Check $case['FirstRunSettingsOKPosted'] 'Could not post IDOK to first-run Settings'
+        for($wait=0;$wait -lt 15;$wait++){
+          if(@(OpenShellSettingsWindows).Count -eq 0){break}
+          Start-Sleep -Seconds 1
+        }
+        $case['FirstRunSettingsDismissed']=(@(OpenShellSettingsWindows).Count -eq 0)
+        Publish 'FIRST_RUN_SETTINGS_CONFIRMED'
+        Check $case['FirstRunSettingsDismissed'] 'First-run Settings remained visible after IDOK'
       }
-      if($case['FirstLeftClickProbe']['SettingsVisible'] -and -not $case['FirstRunSettingsDismissed']){
-        Publish 'FIRST_RUN_SETTINGS_BLOCKS_CLICK_VERIFICATION'
-      }else{
-        $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
-        $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
-        Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
-      }
+      $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
+      $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
+      Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
+      Check ($case['LeftClickProbe']['ButtonWindowFound'] -and $case['LeftClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['LeftClickProbe']['OpenShellMenuVisible']) 'Left click did not open verified Open-Shell menu after setup'
+      Check ($case['RightClickProbe']['ButtonWindowFound'] -and $case['RightClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['RightClickProbe']['ContextPopupVisible'] -and $case['RightClickProbe']['AboveButtonHitClass'] -eq '#32768') 'Right click did not open verified Open-Shell context popup'
     }
     if(($i % 3) -eq 0){
       $state['SettingsRequests']++
