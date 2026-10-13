@@ -90,6 +90,53 @@ function CollectDumps {
   }
 }
 
+# Observe actual input routing through the real layered Start button HWND.
+# The probes are diagnostic only. They do not claim XAML property-level proof.
+function ClickProbe([string]$button) {
+  $result=[ordered]@{Button=$button;Dispatched=$false;OpenShellMenuVisible=$false;ContextPopupVisible=$false}
+  $h=[ShellProbe]::FindWindow('OpenShell.CStartButton',$null)
+  $result['ButtonWindowFound']=($h -ne [IntPtr]::Zero)
+  if($h -eq [IntPtr]::Zero){return $result}
+  $rect=New-Object TAP_RECT
+  if(-not [ShellProbe]::GetWindowRect($h,[ref]$rect)){return $result}
+  $x=[int](($rect.Left+$rect.Right)/2)
+  $y=[int](($rect.Top+$rect.Bottom)/2)
+  $result['TargetX']=$x;$result['TargetY']=$y
+  $pt=New-Object TAP_POINT
+  $pt.X=$x;$pt.Y=$y
+  $hit=[ShellProbe]::WindowFromPoint($pt)
+  $result['HitWindow']=[string]$hit
+  $cls=[System.Text.StringBuilder]::new(128)
+  if($hit -ne [IntPtr]::Zero){$null=[ShellProbe]::GetClassName($hit,$cls,128)}
+  $result['HitClass']=$cls.ToString()
+  if(-not [ShellProbe]::SetCursorPos($x,$y)){return $result}
+  Start-Sleep -Milliseconds 200
+  $down=if($button -eq 'left'){[uint32]0x0002}else{[uint32]0x0008}
+  $up=if($button -eq 'left'){[uint32]0x0004}else{[uint32]0x0010}
+  [ShellProbe]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 80
+  [ShellProbe]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
+  $result['Dispatched']=$true
+  Start-Sleep -Milliseconds 700
+  $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+  $result['OpenShellMenuVisible']=($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu))
+  $popupCount=0
+  $cb=[ShellProbe+EnumWindowProc]{
+    param($hwnd,$unused)
+    if(-not [ShellProbe]::IsWindowVisible($hwnd)){return $true}
+    $name=[System.Text.StringBuilder]::new(128)
+    $null=[ShellProbe]::GetClassName($hwnd,$name,128)
+    if($name.ToString() -eq '#32768'){$popupCount++}
+    return $true
+  }
+  $null=[ShellProbe]::EnumWindows($cb,[IntPtr]::Zero)
+  $result['ContextPopupVisible']=($popupCount -gt 0)
+  Screenshot ('tap-real-'+$button+'-click')
+  [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
+  [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 350
+  return $result
+}
 function Screenshot([string]$label) {
   try {
     Add-Type -AssemblyName System.Drawing,System.Windows.Forms
@@ -138,6 +185,9 @@ public static class ShellProbe {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)]public static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int limit);
  [DllImport("user32.dll", CharSet=CharSet.Unicode)]public static extern int GetClassName(IntPtr hwnd,StringBuilder text,int limit);
  [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
+ [DllImport("user32.dll",SetLastError=true)]public static extern bool SetCursorPos(int x,int y);
+ [DllImport("user32.dll")]public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+ [DllImport("user32.dll")]public static extern void keybd_event(byte key,byte scan,uint flags,UIntPtr extra);
  public delegate bool EnumWindowProc(IntPtr hwnd,IntPtr data);
  [DllImport("user32.dll")]public static extern bool EnumWindows(EnumWindowProc callback,IntPtr data);
 }
@@ -318,6 +368,11 @@ public static class ShellProbe {
     foreach($window in $coldDialogs){$null=[ShellProbe]::PostMessage($window.Hwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)}
     Start-Sleep -Seconds 2
     Screenshot ('tap-cycle-'+$i+'-active')
+    if($i -eq 5) {
+      $case['LeftClickProbe']=ClickProbe 'left'
+      $case['RightClickProbe']=ClickProbe 'right'
+      Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
+    }
     if(($i % 3) -eq 0){
       $state['SettingsRequests']++
       $null=WaitProcess $exe '-settings' 20 ('SETTINGS_REQUEST_'+$i)
