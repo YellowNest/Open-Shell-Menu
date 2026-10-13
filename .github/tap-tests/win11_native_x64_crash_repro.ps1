@@ -476,7 +476,7 @@ public static class TAPTaskbarVisualDiff {
   $logText=[string](Receive-Job $readJob -ErrorAction Stop)
   Remove-Job $readJob -Force -ErrorAction SilentlyContinue
   $lines=@($logText -split "\r?\n")
-  $state['XamlConnectedLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connected using'})
+  $state['XamlConnectedLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connected \(\d+ attempts\)'})
   $state['XamlFailureLogLines']=@($lines|Where-Object {$_ -match 'Win11StartButton: connection failed|Win11StartButtonTap: deactivate failed|Win11StartButtonTap: synchronous restore failed|Win11StartButtonTap: visual tree unadvise failed'})
   $state['XamlConnectedCount']=$state['XamlConnectedLogLines'].Count
   $state['XamlFailureCount']=$state['XamlFailureLogLines'].Count
