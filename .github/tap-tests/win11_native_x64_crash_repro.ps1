@@ -100,8 +100,8 @@ function ForegroundProbe {
   if($foreground -ne [IntPtr]::Zero){$null=[ShellProbe]::GetWindowThreadProcessId($foreground,[ref]$processId)}
   return @{Class=$cls.ToString();Pid=$processId;Hwnd=[string]$foreground}
 }
-function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$true) {
-  $result=[ordered]@{Button=$button;Dispatched=$false;OpenShellMenuVisible=$false;ContextPopupVisible=$false}
+function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$true,[bool]$useSendInput=$false) {
+  $result=[ordered]@{Button=$button;InputMethod=$(if($useSendInput){'SendInput'}else{'mouse_event'});Dispatched=$false;OpenShellMenuVisible=$false;ContextPopupVisible=$false}
   $h=[ShellProbe]::FindWindow('OpenShell.CStartButton',$null)
   $result['ButtonWindowFound']=($h -ne [IntPtr]::Zero)
   if($h -eq [IntPtr]::Zero){return $result}
@@ -122,12 +122,31 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   $result['ForegroundBeforeClick']=ForegroundProbe
   $down=if($button -eq 'left'){[uint32]0x0002}else{[uint32]0x0008}
   $up=if($button -eq 'left'){[uint32]0x0004}else{[uint32]0x0010}
-  [ShellProbe]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
+  if($useSendInput){
+    $downInput=New-Object TAP_INPUT
+    $downInput.type=0
+    $downInput.mi=New-Object TAP_MOUSEINPUT
+    $downInput.mi.dwFlags=$down
+    $sent=[ShellProbe]::SendInput(1,[TAP_INPUT[]]@($downInput),[Runtime.InteropServices.Marshal]::SizeOf([type][TAP_INPUT]))
+    $result['DownEventsSent']=$sent
+  }else{
+    [ShellProbe]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
+  }
   Start-Sleep -Milliseconds 160
   $menuAtDown=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
   $result['MenuVisibleWhileMouseDown']=($menuAtDown -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menuAtDown))
-  [ShellProbe]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
-  $result['Dispatched']=$true
+  if($useSendInput){
+    $upInput=New-Object TAP_INPUT
+    $upInput.type=0
+    $upInput.mi=New-Object TAP_MOUSEINPUT
+    $upInput.mi.dwFlags=$up
+    $sentUp=[ShellProbe]::SendInput(1,[TAP_INPUT[]]@($upInput),[Runtime.InteropServices.Marshal]::SizeOf([type][TAP_INPUT]))
+    $result['UpEventsSent']=$sentUp
+    $result['Dispatched']=($result['DownEventsSent'] -eq 1 -and $sentUp -eq 1)
+  }else{
+    [ShellProbe]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
+    $result['Dispatched']=$true
+  }
   $result['ForegroundAfterMouseUp']=ForegroundProbe
   if($button -eq 'left'){
     # Detect a slow cold menu and a menu that flashes open then closes.
@@ -228,7 +247,16 @@ using System.Runtime.InteropServices;
 using System.Text;
 [StructLayout(LayoutKind.Sequential)] public struct TAP_RECT { public int Left,Top,Right,Bottom; }
 [StructLayout(LayoutKind.Sequential)] public struct TAP_POINT { public int X,Y; }
+// Win32 INPUT is a 40-byte structure on native x64; mi begins at offset 8.
+[StructLayout(LayoutKind.Sequential)] public struct TAP_MOUSEINPUT {
+ public int dx,dy;public uint mouseData,dwFlags,time;public UIntPtr dwExtraInfo;
+}
+[StructLayout(LayoutKind.Explicit,Size=40)] public struct TAP_INPUT {
+ [FieldOffset(0)] public uint type;
+ [FieldOffset(8)] public TAP_MOUSEINPUT mi;
+}
 public static class ShellProbe {
+ [DllImport("user32.dll",SetLastError=true)]public static extern uint SendInput(uint count,[In] TAP_INPUT[] inputs,int size);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr FindWindow(string c,string t);
  [DllImport("user32.dll")]public static extern IntPtr GetShellWindow();
  [DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr hwnd,out TAP_RECT rect);
@@ -471,7 +499,11 @@ public static class ShellProbe {
       $showedProperty=$rootSettings.PSObject.Properties['ShowedStyle2']
       $case['ClickSettingsSnapshot']['ShowedStyle2']=if($null -ne $showedProperty){[string]$showedProperty.Value}else{'ABSENT'}
       Screenshot 'tap-after-first-run-confirmation'
-      $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
+      # Compare legacy injection with the supported SendInput path.
+      # Only a retained menu from real injected SendInput qualifies as a pass.
+      $case['LegacyLeftClickProbe']=ClickProbe 'left' 'legacy-left' $true
+      Start-Sleep -Milliseconds 800
+      $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true $true
       $menuTracePath=Join-Path $env:LOCALAPPDATA 'OpenShell\StartMenuLog.txt'
       if(Test-Path -LiteralPath $menuTracePath){
         $case['LeftClickMenuTrace']=@(Get-Content -LiteralPath $menuTracePath -Tail 80 -ErrorAction Stop)
@@ -506,7 +538,7 @@ public static class ShellProbe {
         [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
       }
       Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
-      Check ($case['LeftClickProbe']['ButtonWindowFound'] -and $case['LeftClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['LeftClickProbe']['OpenShellMenuVisible']) 'Left click did not open verified Open-Shell menu after real first-run OK'
+      Check ($case['LeftClickProbe']['Dispatched'] -and $case['LeftClickProbe']['ButtonWindowFound'] -and $case['LeftClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['LeftClickProbe']['OpenShellMenuVisible']) 'Left click did not open verified Open-Shell menu after real first-run OK'
       Check ($case['RightClickProbe']['ButtonWindowFound'] -and $case['RightClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['RightClickProbe']['ContextPopupVisible'] -and $case['RightClickProbe']['AboveButtonHitClass'] -eq '#32768') 'Right click did not open verified Open-Shell context popup'
     }
     if(($i % 3) -eq 0){
