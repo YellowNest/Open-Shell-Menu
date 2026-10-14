@@ -415,10 +415,13 @@ public static class ShellProbe {
         Check $case['FirstRunSettingsDismissed'] 'First-run Settings remained visible after IDOK'
       }
       Start-Sleep -Seconds 3
+      # Optional registry values may not exist on fresh installs. Reading them
+      # must not terminate the click test under ErrorActionPreference=Stop.
       $case['ClickSettingsSnapshot']=[ordered]@{}
+      $settingValues=Get-ItemProperty -LiteralPath $reg -ErrorAction Stop
       foreach($setting in @('ShowedStyle2','MenuStyle','MouseClick')){
-        $value=Get-ItemPropertyValue -Path $reg -Name $setting -ErrorAction SilentlyContinue
-        $case['ClickSettingsSnapshot'][$setting]=if($null -ne $value){[string]$value}else{'DEFAULT_OR_ABSENT'}
+        $property=$settingValues.PSObject.Properties[$setting]
+        $case['ClickSettingsSnapshot'][$setting]=if($null -ne $property){[string]$property.Value}else{'DEFAULT_OR_ABSENT'}
       }
       Screenshot 'tap-after-first-run-confirmation'
       $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
