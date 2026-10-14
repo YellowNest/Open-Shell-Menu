@@ -200,6 +200,7 @@ public static class ShellProbe {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)]public static extern int GetClassName(IntPtr hwnd,StringBuilder text,int limit);
  [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
  [DllImport("user32.dll",SetLastError=true)]public static extern bool SetCursorPos(int x,int y);
+ [DllImport("user32.dll")]public static extern IntPtr GetDlgItem(IntPtr parent,int id);
  [DllImport("user32.dll")]public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
  [DllImport("user32.dll")]public static extern void keybd_event(byte key,byte scan,uint flags,UIntPtr extra);
  public delegate bool EnumWindowProc(IntPtr hwnd,IntPtr data);
@@ -389,14 +390,22 @@ public static class ShellProbe {
       $firstRunDialogs=@(OpenShellSettingsWindows)
       $case['FirstRunSettingsDialogs']=@($firstRunDialogs|ForEach-Object {$_.Title})
       if($firstRunDialogs.Count -gt 0){
-        # IDOK confirms the initial setup; WM_CLOSE does not save first-run selection.
-        $case['FirstRunSettingsOKPosted']=$true
+        # Click the real first-run IDOK control instead of posting a synthetic WM_COMMAND.
+        $case['FirstRunSettingsOKClicked']=$true
         foreach($window in $firstRunDialogs){
-          if(-not [ShellProbe]::PostMessage($window.Hwnd,0x0111,[IntPtr]1,[IntPtr]::Zero)){
-            $case['FirstRunSettingsOKPosted']=$false
-          }
+          $button=[ShellProbe]::GetDlgItem($window.Hwnd,1)
+          if($button -eq [IntPtr]::Zero){$case['FirstRunSettingsOKClicked']=$false;break}
+          $okRect=New-Object TAP_RECT
+          if(-not [ShellProbe]::GetWindowRect($button,[ref]$okRect)){$case['FirstRunSettingsOKClicked']=$false;break}
+          $okX=[int](($okRect.Left+$okRect.Right)/2)
+          $okY=[int](($okRect.Top+$okRect.Bottom)/2)
+          if(-not [ShellProbe]::SetCursorPos($okX,$okY)){$case['FirstRunSettingsOKClicked']=$false;break}
+          Start-Sleep -Milliseconds 200
+          [ShellProbe]::mouse_event([uint32]0x0002,0,0,0,[UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 80
+          [ShellProbe]::mouse_event([uint32]0x0004,0,0,0,[UIntPtr]::Zero)
         }
-        Check $case['FirstRunSettingsOKPosted'] 'Could not post IDOK to first-run Settings'
+        Check $case['FirstRunSettingsOKClicked'] 'Could not click actual first-run Settings OK button'
         for($wait=0;$wait -lt 15;$wait++){
           if(@(OpenShellSettingsWindows).Count -eq 0){break}
           Start-Sleep -Seconds 1
@@ -405,10 +414,29 @@ public static class ShellProbe {
         Publish 'FIRST_RUN_SETTINGS_CONFIRMED'
         Check $case['FirstRunSettingsDismissed'] 'First-run Settings remained visible after IDOK'
       }
+      Start-Sleep -Seconds 3
+      $case['ClickSettingsSnapshot']=[ordered]@{}
+      foreach($setting in @('ShowedStyle2','MenuStyle','MouseClick')){
+        $value=Get-ItemPropertyValue -Path $reg -Name $setting -ErrorAction SilentlyContinue
+        $case['ClickSettingsSnapshot'][$setting]=if($null -ne $value){[string]$value}else{'DEFAULT_OR_ABSENT'}
+      }
+      Screenshot 'tap-after-first-run-confirmation'
       $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
       $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
+      if(-not $case['LeftClickProbe']['OpenShellMenuVisible']){
+        # Independent keyboard control distinguishes a click-route fault from general menu startup.
+        [ShellProbe]::keybd_event(0x5B,0,0,[UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 200
+        [ShellProbe]::keybd_event(0x5B,0,2,[UIntPtr]::Zero)
+        Start-Sleep -Seconds 2
+        $winMenu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+        $case['WinKeyMenuVisible']=($winMenu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($winMenu))
+        Screenshot 'tap-winkey-control-after-left-failure'
+        [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
+        [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
+      }
       Publish 'REAL_MOUSE_INPUT_PROBES_RECORDED'
-      Check ($case['LeftClickProbe']['ButtonWindowFound'] -and $case['LeftClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['LeftClickProbe']['OpenShellMenuVisible']) 'Left click did not open verified Open-Shell menu after setup'
+      Check ($case['LeftClickProbe']['ButtonWindowFound'] -and $case['LeftClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['LeftClickProbe']['OpenShellMenuVisible']) 'Left click did not open verified Open-Shell menu after real first-run OK'
       Check ($case['RightClickProbe']['ButtonWindowFound'] -and $case['RightClickProbe']['HitClass'] -eq 'OpenShell.CStartButton' -and $case['RightClickProbe']['ContextPopupVisible'] -and $case['RightClickProbe']['AboveButtonHitClass'] -eq '#32768') 'Right click did not open verified Open-Shell context popup'
     }
     if(($i % 3) -eq 0){
