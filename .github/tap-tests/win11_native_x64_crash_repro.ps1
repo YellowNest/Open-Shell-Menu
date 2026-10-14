@@ -125,8 +125,9 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   if($useSendInput){
     $downInput=New-Object TAP_INPUT
     $downInput.type=0
-    $downInput.mi=New-Object TAP_MOUSEINPUT
-    $downInput.mi.dwFlags=$down
+    $downMouse=New-Object TAP_MOUSEINPUT
+    $downMouse.dwFlags=$down
+    $downInput.mi=$downMouse
     $sent=[ShellProbe]::SendInput(1,[TAP_INPUT[]]@($downInput),[Runtime.InteropServices.Marshal]::SizeOf([type][TAP_INPUT]))
     $result['DownEventsSent']=$sent
   }else{
@@ -138,8 +139,9 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   if($useSendInput){
     $upInput=New-Object TAP_INPUT
     $upInput.type=0
-    $upInput.mi=New-Object TAP_MOUSEINPUT
-    $upInput.mi.dwFlags=$up
+    $upMouse=New-Object TAP_MOUSEINPUT
+    $upMouse.dwFlags=$up
+    $upInput.mi=$upMouse
     $sentUp=[ShellProbe]::SendInput(1,[TAP_INPUT[]]@($upInput),[Runtime.InteropServices.Marshal]::SizeOf([type][TAP_INPUT]))
     $result['UpEventsSent']=$sentUp
     $result['Dispatched']=($result['DownEventsSent'] -eq 1 -and $sentUp -eq 1)
