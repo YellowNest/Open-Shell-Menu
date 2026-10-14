@@ -92,6 +92,14 @@ function CollectDumps {
 
 # Observe actual input routing through the real layered Start button HWND.
 # The probes are diagnostic only. They do not claim XAML property-level proof.
+function ForegroundProbe {
+  $foreground=[ShellProbe]::GetForegroundWindow()
+  $cls=[System.Text.StringBuilder]::new(128)
+  if($foreground -ne [IntPtr]::Zero){$null=[ShellProbe]::GetClassName($foreground,$cls,128)}
+  $processId=[uint32]0
+  if($foreground -ne [IntPtr]::Zero){$null=[ShellProbe]::GetWindowThreadProcessId($foreground,[ref]$processId)}
+  return @{Class=$cls.ToString();Pid=$processId;Hwnd=[string]$foreground}
+}
 function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$true) {
   $result=[ordered]@{Button=$button;Dispatched=$false;OpenShellMenuVisible=$false;ContextPopupVisible=$false}
   $h=[ShellProbe]::FindWindow('OpenShell.CStartButton',$null)
@@ -111,6 +119,7 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   $result['HitClass']=$cls.ToString()
   if(-not [ShellProbe]::SetCursorPos($x,$y)){return $result}
   Start-Sleep -Milliseconds 200
+  $result['ForegroundBeforeClick']=ForegroundProbe
   $down=if($button -eq 'left'){[uint32]0x0002}else{[uint32]0x0008}
   $up=if($button -eq 'left'){[uint32]0x0004}else{[uint32]0x0010}
   [ShellProbe]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
@@ -119,6 +128,7 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   $result['MenuVisibleWhileMouseDown']=($menuAtDown -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menuAtDown))
   [ShellProbe]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
   $result['Dispatched']=$true
+  $result['ForegroundAfterMouseUp']=ForegroundProbe
   if($button -eq 'left'){
     # Detect a slow cold menu and a menu that flashes open then closes.
     $result['MenuFirstVisibleAfterUpMs']=-1
@@ -126,16 +136,30 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
       $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
       if($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu)){
         $result['MenuFirstVisibleAfterUpMs']=$elapsed
+        $result['ForegroundAtMenuAppearance']=ForegroundProbe
         break
       }
       Start-Sleep -Milliseconds 100
     }
-    if($result['MenuFirstVisibleAfterUpMs'] -ge 0){Start-Sleep -Milliseconds 600}
+    if($result['MenuFirstVisibleAfterUpMs'] -ge 0){
+      # Observe if menu remains open; record foreground when it vanishes.
+      $result['MenuFirstHiddenAfterUpMs']=-1
+      for($extra=100;$extra -le 1000;$extra+=50){
+        Start-Sleep -Milliseconds 50
+        $observed=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+        if($observed -eq [IntPtr]::Zero -or -not [ShellProbe]::IsWindowVisible($observed)){
+          $result['MenuFirstHiddenAfterUpMs']=$result['MenuFirstVisibleAfterUpMs']+$extra
+          $result['ForegroundAtMenuDisappearance']=ForegroundProbe
+          break
+        }
+      }
+    }
   }else{
     Start-Sleep -Milliseconds 700
   }
   $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
   $result['OpenShellMenuVisible']=($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu))
+  $result['ForegroundAfterProbe']=ForegroundProbe
   $popupWindows=[System.Collections.Generic.List[string]]::new()
   $cb=[ShellProbe+EnumWindowProc]{
     param($hwnd,$unused)
@@ -209,6 +233,7 @@ public static class ShellProbe {
  [DllImport("user32.dll")]public static extern IntPtr GetShellWindow();
  [DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr hwnd,out TAP_RECT rect);
  [DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();
  [DllImport("user32.dll")]public static extern IntPtr WindowFromPoint(TAP_POINT point);
  [DllImport("user32.dll")]public static extern IntPtr GetAncestor(IntPtr hwnd,uint flags);
  [DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
@@ -285,6 +310,8 @@ public static class ShellProbe {
   $reg='HKCU:\Software\OpenShell\StartMenu\Settings'
   New-Item -Path $reg -Force|Out-Null
   New-ItemProperty -Path $reg -Name LogStartup -PropertyType DWord -Value 1 -Force|Out-Null
+  # Enable Open-Shell's built-in open/close log (LOG_OPEN=0x001) without changing binaries.
+  New-ItemProperty -Path $reg -Name LogCategories -PropertyType DWord -Value 1 -Force|Out-Null
   New-ItemProperty -Path $reg -Name EnableStartButton -PropertyType DWord -Value 0 -Force|Out-Null
   # Windows Error Reporting keeps real Explorer/StartMenu minidumps instead
   # of relying on crash event ID alone. Must be configured before launch.
@@ -445,6 +472,13 @@ public static class ShellProbe {
       $case['ClickSettingsSnapshot']['ShowedStyle2']=if($null -ne $showedProperty){[string]$showedProperty.Value}else{'ABSENT'}
       Screenshot 'tap-after-first-run-confirmation'
       $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
+      $menuTracePath=Join-Path $env:LOCALAPPDATA 'OpenShell\StartMenuLog.txt'
+      if(Test-Path -LiteralPath $menuTracePath){
+        $case['LeftClickMenuTrace']=@(Get-Content -LiteralPath $menuTracePath -Tail 80 -ErrorAction Stop)
+        foreach($remote in @('Z:\','\\host.lan\Shared\')){
+          try {Copy-Item -LiteralPath $menuTracePath -Destination ($remote+'startmenu-after-real-left.txt') -Force -ErrorAction Stop;break}catch{}
+        }
+      }
       $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
       if(-not $case['LeftClickProbe']['OpenShellMenuVisible']){
         # Independent diagnostic: queued WM_LBUTTONDOWN versus a real injected mouse click.
