@@ -3966,7 +3966,7 @@ if (!g_bTrimHooks)
 		if (msg->message==WM_MOUSEMOVE)
 		{
 			TaskbarInfo *taskBar=FindTaskBarInfoButton(msg->hwnd);
-			if (taskBar && !CMenuContainer::IsMenuOpened() && !WindowsMenuOpened())
+			if (taskBar && !taskBar->bSuppressHover && !CMenuContainer::IsMenuOpened() && !WindowsMenuOpened())
 			{
 				if (GetSettingInt(L"Hover") && !taskBar->bTimer)
 				{
@@ -3987,6 +3987,7 @@ if (!g_bTrimHooks)
 			TaskbarInfo *taskBar=FindTaskBarInfoButton(msg->hwnd);
 			if (taskBar)
 			{
+				taskBar->bSuppressHover=false;
 				taskBar->bTimer=false;
 				KillTimer(msg->hwnd,'CLSM');
 				if (taskBar->oldButton==msg->hwnd)
@@ -4013,7 +4014,9 @@ if (!g_bTrimHooks)
 			TaskbarInfo *taskBar=FindTaskBarInfoBar(msg->hwnd);
 			if (taskBar)
 			{
-				if (!CMenuContainer::IsMenuOpened() && !WindowsMenuOpened() && PointAroundStartButton(taskBar->taskbarId))
+				if (!PointAroundStartButton(taskBar->taskbarId))
+					taskBar->bSuppressHover=false;
+				if (!taskBar->bSuppressHover && !CMenuContainer::IsMenuOpened() && !WindowsMenuOpened() && PointAroundStartButton(taskBar->taskbarId))
 				{
 					if (!taskBar->bTimer)
 					{
@@ -4232,6 +4235,8 @@ if (!g_bTrimHooks)
 					// Win+X is shown asynchronously on Windows 11. Cancel any pending
 					// hover-open timer first, otherwise it can open the configured
 					// hover menu a moment later and dismiss Win+X again.
+					if (IsWin11())
+						taskBar->bSuppressHover=true;
 					if (taskBar->bTimer)
 					{
 						taskBar->bTimer=false;
