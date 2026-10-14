@@ -114,10 +114,26 @@ function ClickProbe([string]$button,[string]$label=$button,[bool]$dismissAfter=$
   $down=if($button -eq 'left'){[uint32]0x0002}else{[uint32]0x0008}
   $up=if($button -eq 'left'){[uint32]0x0004}else{[uint32]0x0010}
   [ShellProbe]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
-  Start-Sleep -Milliseconds 80
+  Start-Sleep -Milliseconds 160
+  $menuAtDown=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+  $result['MenuVisibleWhileMouseDown']=($menuAtDown -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menuAtDown))
   [ShellProbe]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
   $result['Dispatched']=$true
-  Start-Sleep -Milliseconds 700
+  if($button -eq 'left'){
+    # Detect a slow cold menu and a menu that flashes open then closes.
+    $result['MenuFirstVisibleAfterUpMs']=-1
+    for($elapsed=0;$elapsed -le 4000;$elapsed+=100){
+      $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+      if($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu)){
+        $result['MenuFirstVisibleAfterUpMs']=$elapsed
+        break
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    if($result['MenuFirstVisibleAfterUpMs'] -ge 0){Start-Sleep -Milliseconds 600}
+  }else{
+    Start-Sleep -Milliseconds 700
+  }
   $menu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
   $result['OpenShellMenuVisible']=($menu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($menu))
   $popupWindows=[System.Collections.Generic.List[string]]::new()
@@ -419,14 +435,31 @@ public static class ShellProbe {
       # must not terminate the click test under ErrorActionPreference=Stop.
       $case['ClickSettingsSnapshot']=[ordered]@{}
       $settingValues=Get-ItemProperty -LiteralPath $reg -ErrorAction Stop
-      foreach($setting in @('ShowedStyle2','MenuStyle','MouseClick')){
+      foreach($setting in @('MenuStyle','MouseClick')){
         $property=$settingValues.PSObject.Properties[$setting]
         $case['ClickSettingsSnapshot'][$setting]=if($null -ne $property){[string]$property.Value}else{'DEFAULT_OR_ABSENT'}
       }
+      # ShowedStyle2 is written to the StartMenu root, not the Settings child.
+      $rootSettings=Get-ItemProperty -LiteralPath 'HKCU:\Software\OpenShell\StartMenu' -ErrorAction Stop
+      $showedProperty=$rootSettings.PSObject.Properties['ShowedStyle2']
+      $case['ClickSettingsSnapshot']['ShowedStyle2']=if($null -ne $showedProperty){[string]$showedProperty.Value}else{'ABSENT'}
       Screenshot 'tap-after-first-run-confirmation'
       $case['LeftClickProbe']=ClickProbe 'left' 'after-setup-left' $true
       $case['RightClickProbe']=ClickProbe 'right' 'after-setup-right' $true
       if(-not $case['LeftClickProbe']['OpenShellMenuVisible']){
+        # Independent diagnostic: queued WM_LBUTTONDOWN versus a real injected mouse click.
+        # A synthetic message is never accepted as proof of genuine mouse-click success.
+        $buttonWindow=[ShellProbe]::FindWindow('OpenShell.CStartButton',$null)
+        $case['PostedButtonDown']=($buttonWindow -ne [IntPtr]::Zero -and [ShellProbe]::PostMessage($buttonWindow,0x0201,[IntPtr]1,[IntPtr]0))
+        Start-Sleep -Seconds 2
+        $postedMenu=[ShellProbe]::FindWindow('OpenShell.CMenuContainer',$null)
+        $case['PostedButtonDownMenuVisible']=($postedMenu -ne [IntPtr]::Zero -and [ShellProbe]::IsWindowVisible($postedMenu))
+        Screenshot 'tap-diagnostic-posted-button-down'
+        if($case['PostedButtonDownMenuVisible']){
+          [ShellProbe]::keybd_event(0x1B,0,0,[UIntPtr]::Zero)
+          [ShellProbe]::keybd_event(0x1B,0,2,[UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 400
+        }
         # Independent keyboard control distinguishes a click-route fault from general menu startup.
         [ShellProbe]::keybd_event(0x5B,0,0,[UIntPtr]::Zero)
         Start-Sleep -Milliseconds 200
