@@ -4235,7 +4235,8 @@ if (!g_bTrimHooks)
 					// Win+X is shown asynchronously on Windows 11. Cancel any pending
 					// hover-open timer first, otherwise it can open the configured
 					// hover menu a moment later and dismiss Win+X again.
-					taskBar->bSuppressHover=true;
+					if (IsWin11())
+						taskBar->bSuppressHover=true;
 					if (taskBar->bTimer)
 					{
 						taskBar->bTimer=false;
