@@ -44,6 +44,9 @@ jobs:
           mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
           cp .github/tap-tests/install.bat "$ROOT/oem/"
           cp .github/tap-tests/win11_native_x64_crash_repro.ps1 "$ROOT/oem/win11_native_x64_stress.ps1"
+          export TEST_SCRIPT_PATH="$ROOT/oem/win11_native_x64_stress.ps1"
+          # Fail before provisioning Windows when PowerShell test syntax is invalid.
+          pwsh -NoProfile -NonInteractive -Command '$tokens=$null; $parseErrors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:TEST_SCRIPT_PATH,[ref]$tokens,[ref]$parseErrors); if($parseErrors.Count -gt 0) { $parseErrors | ForEach-Object { Write-Error $_.Message }; exit 2 }; Write-Output "POWERSHELL_TEST_SYNTAX_OK"'
           grep -Fq "NOSTART=1" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "ExplorerPidContinuity" "$ROOT/oem/win11_native_x64_stress.ps1"
           grep -Fq "LogStartup" "$ROOT/oem/win11_native_x64_stress.ps1"
