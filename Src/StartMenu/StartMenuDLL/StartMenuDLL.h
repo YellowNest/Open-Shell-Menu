@@ -47,7 +47,7 @@ void EnableStartTooltip( bool bEnable );
 
 struct TaskbarInfo
 {
-	TaskbarInfo( void ) { taskbarId=pointerId=0; taskBar=startButton=oldButton=rebar=taskList=chevron=news=desktop=NULL; startButtonSize.cx=startButtonSize.cy=0; oldButtonSize.cx=oldButtonSize.cy=0; bTimer=bCustomLook=bReplaceButton=bHideButton=bRecreatingButton=bThemeChanging=false; }
+	TaskbarInfo( void ) { taskbarId=pointerId=0; taskBar=startButton=oldButton=rebar=taskList=chevron=news=desktop=NULL; startButtonSize.cx=startButtonSize.cy=0; oldButtonSize.cx=oldButtonSize.cy=0; bTimer=bSuppressHover=bCustomLook=bReplaceButton=bHideButton=bRecreatingButton=bThemeChanging=false; }
 	int taskbarId;
 	HWND taskBar;
 	HWND startButton; // either own start button or the win7 start button (depending on bReplaceButton)
@@ -61,6 +61,7 @@ struct TaskbarInfo
 	SIZE oldButtonSize;
 	int pointerId;
 	bool bTimer;
+	bool bSuppressHover; // prevent hover reopening the Start menu immediately after Win+X
 	bool bCustomLook;
 	bool bReplaceButton; // replace start button with own one
 	bool bHideButton; // hide old start button (if we have own button)
