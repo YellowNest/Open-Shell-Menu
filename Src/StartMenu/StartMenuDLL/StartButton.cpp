@@ -102,6 +102,7 @@ private:
 	void ParseAnimation( Animation &animation, const std::vector<unsigned int> &pixels, int &index, int totalFrames );
 	void LoadBitmap( void );
 	void SetHot( bool bHot );
+	void MakeTaskbarPixelsHitTestable( void );
 };
 
 CStartButton::CStartButton( void )
@@ -172,6 +173,47 @@ LRESULT CStartButton::OnDestroy( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& 
 	return 0;
 }
 
+void CStartButton::MakeTaskbarPixelsHitTestable( void )
+{
+	if (!IsWin11() || !m_BlendBits || m_Size.cx<=0 || m_Size.cy<=0)
+		return;
+
+	RECT buttonRect = {};
+	RECT taskbarRect = {};
+	RECT hitRect = {};
+	HWND taskbar = GetParent();
+	if (!GetWindowRect(&buttonRect) || !taskbar ||
+		!::GetWindowRect(taskbar, &taskbarRect) ||
+		!IntersectRect(&hitRect, &buttonRect, &taskbarRect))
+		return;
+
+	int left = hitRect.left-buttonRect.left;
+	int top = hitRect.top-buttonRect.top;
+	int right = hitRect.right-buttonRect.left;
+	int bottom = hitRect.bottom-buttonRect.top;
+	if (left<0) left=0;
+	if (top<0) top=0;
+	if (right>m_Size.cx) right=m_Size.cx;
+	if (bottom>m_Size.cy) bottom=m_Size.cy;
+
+	// A fully transparent pixel in a WS_EX_LAYERED window is skipped during
+	// mouse hit-testing. The old WH_MOUSE hook existed largely to catch those
+	// fall-through clicks before the Win11 XAML Start button consumed them.
+	//
+	// Alpha 1 is visually indistinguishable from transparent, but keeps the
+	// Open-Shell HWND in the mouse path. Limit this to the taskbar intersection
+	// so transparent artwork protruding above/aside the taskbar stays click-through.
+	for (int y=top; y<bottom; y++)
+	{
+		for (int x=left; x<right; x++)
+		{
+			unsigned int &pixel=m_BlendBits[y*m_Size.cx+x];
+			if ((pixel&0xFF000000)==0)
+				pixel=0x01000000;
+		}
+	}
+}
+
 void CStartButton::UpdateButton( void )
 {
 	BLENDFUNCTION func={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
@@ -225,6 +267,7 @@ void CStartButton::UpdateButton( void )
 		for (int y=START_BUTTON_OFFSET;y<m_Size.cy-START_BUTTON_OFFSET;y++)
 			for (int x=START_BUTTON_OFFSET;x<m_Size.cx-START_BUTTON_OFFSET;x++)
 				m_BlendBits[y*m_Size.cx+x]|=0xFF000000;
+		MakeTaskbarPixelsHitTestable();
 		SelectObject(hSrc,m_Blendmap);
 
 		POINT pos={0,0};
@@ -265,10 +308,26 @@ void CStartButton::UpdateButton( void )
 
 		if (image!=-1)
 		{
-			HGDIOBJ bmp0=SelectObject(hSrc,m_Bitmap);
-			POINT pos={0,image*m_Size.cy+m_YOffset};
-			UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
-			SelectObject(hSrc,bmp0);
+			if (IsWin11() && m_Bits && m_BlendBits)
+			{
+				// Render the selected frame through the scratch DIB on Win11 so
+				// transparent pixels inside the taskbar can participate in HWND
+				// hit-testing without mutating the source image/animation frames.
+				int n=m_Size.cx*m_Size.cy;
+				memcpy(m_BlendBits,m_Bits+image*n,n*sizeof(unsigned int));
+				MakeTaskbarPixelsHitTestable();
+				HGDIOBJ bmp0=SelectObject(hSrc,m_Blendmap);
+				POINT pos={0,0};
+				UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
+				SelectObject(hSrc,bmp0);
+			}
+			else
+			{
+				HGDIOBJ bmp0=SelectObject(hSrc,m_Bitmap);
+				POINT pos={0,image*m_Size.cy+m_YOffset};
+				UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
+				SelectObject(hSrc,bmp0);
+			}
 		}
 		else if (m_Bits)
 		{
@@ -294,6 +353,7 @@ void CStartButton::UpdateButton( void )
 				int b=b1+(b2-b1)*blend/BLEND_PRECISION;
 				m_BlendBits[i]=(a<<24)|(r<<16)|(g<<8)|b;
 			}
+			MakeTaskbarPixelsHitTestable();
 			HGDIOBJ bmp0=SelectObject(hSrc,m_Blendmap);
 			POINT pos={0,0};
 			UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
