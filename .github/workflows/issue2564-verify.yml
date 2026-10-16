@@ -36,15 +36,6 @@ jobs:
           $version=[version]$tag.Substring(1)
           $next="$($version.Major).$($version.Minor).$($version.Build+1)-issue2564"
           "CS_VERSION=$next" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Build binaries
-        shell: cmd
-        run: Src\Setup\BuildBinaries.bat
-      - name: Build installer
-        shell: cmd
-        run: Src\Setup\_BuildEnglish.bat
-      - name: Build setup
-        shell: cmd
-        run: Src\Setup\BuildArchives.bat
       - name: Configure MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -55,6 +46,15 @@ jobs:
       - name: Execute Windows Shell link test
         shell: cmd
         run: issue2564-link-test.exe
+      - name: Build binaries
+        shell: cmd
+        run: Src\Setup\BuildBinaries.bat
+      - name: Build installer
+        shell: cmd
+        run: Src\Setup\_BuildEnglish.bat
+      - name: Build setup
+        shell: cmd
+        run: Src\Setup\BuildArchives.bat
       - name: Publish Windows probe executable
         uses: actions/upload-artifact@v7
         with:

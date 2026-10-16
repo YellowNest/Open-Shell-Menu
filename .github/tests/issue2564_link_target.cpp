@@ -62,6 +62,7 @@ int wmain()
                 {
                     wchar_t resultingPath[MAX_PATH]{};
                     ok &= Check(SHGetPathFromIDListW(targetPidl, resultingPath) != FALSE, "Target PIDL converts to path");
+                    wprintf(L"EXPECTED_TARGET=%ls\nRESOLVED_TARGET=%ls\n", targetPath, resultingPath);
                     ok &= Check(_wcsicmp(resultingPath, targetPath) == 0, "Open file location selects actual target");
                 }
             }
