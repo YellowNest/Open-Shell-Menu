@@ -1,0 +1,130 @@
+name: Issue 2564 Windows 11 Shell Verification
+permissions:
+  contents: read
+  actions: read
+on:
+  push:
+    branches:
+      - fix/issue2564-opencontaining-target-20261016
+    paths:
+      - .github/workflows/issue2564-win11.yml
+jobs:
+  native-win11:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Windows 11 guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sudo test -c /dev/kvm
+          ROOT="$RUNNER_TEMP/issue2564"
+          mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
+          cp .github/tests/issue2564-guest.ps1 "$ROOT/oem/issue2564-guest.ps1"
+          cp .github/tests/issue2564-oem-install.bat "$ROOT/oem/install.bat"
+          export GUEST_PS="$ROOT/oem/issue2564-guest.ps1"
+          pwsh -NoProfile -NonInteractive -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:GUEST_PS,[ref]$t,[ref]$e); if($e.Count){$e | ForEach-Object {Write-Error $_.Message};exit 2};"PS_SYNTAX_OK"'
+      - name: Confirm tested Windows probe artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${ github.token }
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            status="$(gh api repos/YellowNest/Open-Shell-Menu/actions/runs/38954240796 --jq '.status')"
+            names="$(gh api repos/YellowNest/Open-Shell-Menu/actions/runs/38954240796/artifacts --jq '.artifacts[].name')"
+            if printf '%s\n' "$names" | grep -Fxq issue2564-link-probe; then exit 0; fi
+            if test "$status" = completed; then echo "PROBE_NOT_PUBLISHED"; exit 2; fi
+            sleep 10
+          done
+          echo "PROBE_WAIT_EXPIRED"
+          exit 3
+      - uses: actions/download-artifact@v8
+        with:
+          name: issue2564-link-probe
+          repository: YellowNest/Open-Shell-Menu
+          run-id: 38954240796
+          github-token: ${ github.token }
+          path: ${ runner.temp }/issue2564/shared
+      - name: Verify Windows executable and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/issue2564/shared"
+          test -s "$DIR/issue2564-link-test.exe"
+          test "$(head -c 2 "$DIR/issue2564-link-test.exe")" = MZ
+          sha256sum "$DIR/issue2564-link-test.exe" | awk '{print $1}' > "$DIR/probe.sha256"
+          echo "SHA256=$(cat "$DIR/probe.sha256")"
+      - name: Execute real Windows 11 x64 Shell test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/issue2564"
+          sudo docker pull dockurr/windows:latest
+          PASS="$(openssl rand -hex 16)"
+          sudo docker run -d --name issue2564-win11 \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -p 127.0.0.1:8006:8006 \
+            -e VERSION=11 -e RAM_SIZE=7G -e CPU_CORES=4 \
+            -e DISK_SIZE=64G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
+            -e LOG=Y \
+            -v "$ROOT/storage:/storage" -v "$ROOT/oem:/oem" -v "$ROOT/shared:/shared" \
+            dockurr/windows:latest
+          done=0
+          stage=NONE
+          for i in $(seq 1 160); do
+            if test -s "$ROOT/shared/issue2564-win11-proof.json"; then
+              state="$(python3 - "$ROOT/shared/issue2564-win11-proof.json" <<'PY'
+          import json,sys
+          try:
+            with open(sys.argv[1],encoding='utf-8-sig') as f: r=json.load(f)
+            print(str(r.get('Stage','?'))+'|'+str(r.get('Terminal',False)).lower())
+          except (OSError,ValueError): print('INCOMPLETE|false')
+          PY
+              )"
+              stage="$(printf '%s' "$state" | cut -d'|' -f1)"
+              if test "$(printf '%s' "$state" | cut -d'|' -f2)" = true; then done=1; break; fi
+            fi
+            if ! sudo docker inspect -f '{{.State.Running}}' issue2564-win11 | grep -q true; then echo VM_STOPPED; break; fi
+            if (( i % 8 == 0 )); then
+              echo "POLL=$i STAGE=$stage"
+              sudo docker logs --tail 12 issue2564-win11 2>&1 || true
+            fi
+            sleep 15
+          done
+          test "$done" -eq 1 || { echo GUEST_REPORT_MISSING; exit 4; }
+          python3 - "$ROOT/shared/issue2564-win11-proof.json" <<'PY'
+          import json,sys
+          with open(sys.argv[1],encoding='utf-8-sig') as f: r=json.load(f)
+          print('WINDOWS',r.get('OS'),r.get('Build'),'STAGE',r.get('Stage'))
+          print('EXPLORER',r.get('ExplorerPidBefore'),r.get('ExplorerPidAfter'))
+          print('OUTPUT',r.get('Results'),'FAILURE',r.get('Failure'))
+          assert r.get('Stage') == 'TEST_COMPLETE',r
+          assert r.get('Windows11X64Verified') is True,r
+          assert r.get('ExplorerPidBefore')==r.get('ExplorerPidAfter'),r
+          assert r.get('ProbeExitCode')==0,r
+          assert 'ISSUE2564_LINK_TARGET_RESULT=PASS' in r.get('Results',[]),r
+          print('WINDOWS11_LINK_TARGET_API_PASS')
+          print('LIMITATION: isolated Shell API check, not full Open-Shell context menu interaction')
+          PY
+      - name: Collect guest evidence
+        if: always()
+        shell: bash
+        run: |
+          ROOT="$RUNNER_TEMP/issue2564"
+          mkdir -p "$ROOT/evidence"
+          if sudo docker inspect issue2564-win11 >/dev/null 2>&1; then
+            sudo docker logs --tail 350 issue2564-win11 > "$ROOT/evidence/vm.log" 2>&1 || true
+            sudo docker rm -f issue2564-win11 >/dev/null 2>&1 || true
+          fi
+          cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.txt "$ROOT/evidence/" 2>/dev/null || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: issue2564-win11-guest-evidence
+          path: ${ runner.temp }/issue2564/evidence
+          retention-days: 3
+          if-no-files-found: warn
