@@ -8,6 +8,8 @@ on:
       - fix/issue2564-opencontaining-target-20261016
     paths:
       - .github/workflows/issue2564-win11.yml
+      - .github/tests/issue2564-guest.ps1
+      - .github/tests/issue2564-oem-install.bat
 jobs:
   native-win11:
     runs-on: ubuntu-24.04

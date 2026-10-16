@@ -40,7 +40,7 @@ try{
   Publish 'RUNNING_SHELL_LINK_TEST'
   $out='C:\OEM\issue2564-link-output.txt'
   $err='C:\OEM\issue2564-link-errors.txt'
-  $process=Start-Process -FilePath $probe -ArgumentList @() -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+  $process=Start-Process -FilePath $probe -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
   $state['ProbeExitCode']=$process.ExitCode
   $state['Results']=@(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
   $state['Stderr']=@(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
