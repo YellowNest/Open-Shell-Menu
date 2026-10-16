@@ -29,7 +29,7 @@ jobs:
       - name: Confirm tested Windows probe artifact
         shell: bash
         env:
-          GH_TOKEN: ${ github.token }
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
@@ -46,8 +46,8 @@ jobs:
           name: issue2564-link-probe
           repository: YellowNest/Open-Shell-Menu
           run-id: 38954240796
-          github-token: ${ github.token }
-          path: ${ runner.temp }/issue2564/shared
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/issue2564/shared
       - name: Verify Windows executable and manifest
         shell: bash
         run: |
@@ -125,6 +125,6 @@ jobs:
         if: always()
         with:
           name: issue2564-win11-guest-evidence
-          path: ${ runner.temp }/issue2564/evidence
+          path: ${{ runner.temp }}/issue2564/evidence
           retention-days: 3
           if-no-files-found: warn
