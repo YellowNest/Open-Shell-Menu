@@ -1,0 +1,71 @@
+name: Issue 2564 Shell Link Regression Verification
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - fix/issue2564-opencontaining-target-20261016
+    paths:
+      - 'Src/**'
+      - '.github/tests/issue2564_link_target.cpp'
+      - '.github/workflows/issue2564-verify.yml'
+
+jobs:
+  windows-shell-and-build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify narrowly scoped product change
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git diff --name-only 9dfa7fa5c3614de15d0ff4f3eba7edd9e2dcbd24 HEAD -- Src/)"
+          test "$actual" = "Src/StartMenu/StartMenuDLL/MenuCommands.cpp" || { echo "Unexpected changed files: $actual"; exit 1; }
+          echo "PRODUCT_CHANGE_SCOPE=ONE_FILE"
+      - name: Prepare version
+        shell: pwsh
+        run: |
+          $tag=git describe --tags --abbrev=0 2>$null
+          if ($tag -notmatch '^v[0-9]+[.][0-9]+[.][0-9]+$') { throw "Invalid release tag: $tag" }
+          $version=[version]$tag.Substring(1)
+          $next="$($version.Major).$($version.Minor).$($version.Build+1)-issue2564"
+          "CS_VERSION=$next" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build binaries
+        shell: cmd
+        run: Src\Setup\BuildBinaries.bat
+      - name: Build installer
+        shell: cmd
+        run: Src\Setup\_BuildEnglish.bat
+      - name: Build setup
+        shell: cmd
+        run: Src\Setup\BuildArchives.bat
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Compile Shell link behavior probe
+        shell: cmd
+        run: cl /nologo /EHsc /std:c++17 /W4 .github\tests\issue2564_link_target.cpp /Fe:issue2564-link-test.exe ole32.lib shell32.lib
+      - name: Execute Windows Shell link test
+        shell: cmd
+        run: issue2564-link-test.exe
+      - name: Publish Windows probe executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue2564-link-probe
+          path: issue2564-link-test.exe
+          retention-days: 3
+          if-no-files-found: error
+      - name: Publish patched Open-Shell setup
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue2564-patched-setup
+          path: Src/Setup/Final/OpenShellSetup*.exe
+          retention-days: 3
+          if-no-files-found: error
