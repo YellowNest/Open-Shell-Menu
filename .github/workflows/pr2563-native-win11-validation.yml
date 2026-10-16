@@ -45,7 +45,6 @@ jobs:
         with:
           name: pr2563-setup
           path: Src/Setup/Final/OpenShellSetup*.exe
-          archive: false
           retention-days: 3
           if-no-files-found: error
 
@@ -73,7 +72,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: pr2563-setup
-          path: ${ runner.temp }/pr2563/shared
+          path: ${{ runner.temp }}/pr2563/shared
       - name: Verify installer integrity manifest
         shell: bash
         run: |
@@ -164,6 +163,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: pr2563-win11-evidence
-          path: ${ runner.temp }/pr2563/evidence
+          path: ${{ runner.temp }}/pr2563/evidence
           retention-days: 3
           if-no-files-found: warn
