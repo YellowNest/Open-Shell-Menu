@@ -284,12 +284,39 @@ private:
 		const bool enabled = settings.startButtonEnabled;
 		const bool allTaskbars = settings.startButtonAllTaskbars;
 
+		// Diagnostic-only: observe the effective value before and after every
+		// actual property mutation; never set properties from the probe.
+		auto observeValue = [&](InstanceHandle handle, const wchar_t* property, int phase, bool setting)
+			{
+				auto ui = FromHandle<wux::IUIElement>(handle);
+				if (!ui)
+				{
+					LogToFile(STARTUP_LOG, L"ExplorerTapPropertyProbe: handle=%llu phase=%d setting=%d interface=missing", (unsigned long long)handle, phase, setting);
+					return;
+				}
+				if (wcscmp(property, L"Windows.UI.Xaml.UIElement.Visibility") == 0)
+				{
+					wux::Visibility observed{};
+					HRESULT hr = ui->get_Visibility(&observed);
+					LogToFile(STARTUP_LOG, L"ExplorerTapPropertyProbe: handle=%llu property=Visibility phase=%d setting=%d value=%d hr=0x%08X", (unsigned long long)handle, phase, setting, (int)observed, hr);
+				}
+				else
+				{
+					boolean observed{};
+					HRESULT hr = ui->get_IsHitTestVisible(&observed);
+					LogToFile(STARTUP_LOG, L"ExplorerTapPropertyProbe: handle=%llu property=IsHitTestVisible phase=%d setting=%d value=%d hr=0x%08X", (unsigned long long)handle, phase, setting, (int)observed, hr);
+				}
+			};
+
 		// Both properties share the same set/restore behavior.
 		auto applyOverride = [&](InstanceHandle handle, const wchar_t* property, const wchar_t* value, const wchar_t* valueType, bool shouldOverride, bool& hasOverride)
 			{
 				if (shouldOverride != hasOverride)
 				{
+					observeValue(handle, property, 0, shouldOverride);
 					HRESULT hr = shouldOverride ? SetPropertyText(handle, property, value, valueType) : ClearPropertyByName(handle, property);
+					LogToFile(STARTUP_LOG, L"ExplorerTapPropertyProbe: handle=%llu operation=0x%08X setting=%d", (unsigned long long)handle, hr, shouldOverride);
+					observeValue(handle, property, 1, shouldOverride);
 					if (SUCCEEDED(hr))
 						hasOverride = shouldOverride;
 				}

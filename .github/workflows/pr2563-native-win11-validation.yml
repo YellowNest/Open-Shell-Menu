@@ -1,0 +1,191 @@
+name: PR2563 Native Windows 11 Validation
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - review/pr2563-xaml-property-probe-20261017
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Confirm base revision and isolated diagnostic changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 10877cb87d8a4b8ce9f4253576cc6dd5e84ab0fd HEAD
+          git diff --exit-code 10877cb87d8a4b8ce9f4253576cc6dd5e84ab0fd HEAD -- Src/StartMenu/StartMenuDLL/ Src/StartMenu/StartMenuHelper/ExplorerTap.h
+          test "$(git rev-parse 10877cb87d8a4b8ce9f4253576cc6dd5e84ab0fd:Src/StartMenu/StartMenuHelper/ExplorerTap.cpp)" = 54e8bb329dc29273a5dafaef880564d584c4b2dc
+          git diff 10877cb87d8a4b8ce9f4253576cc6dd5e84ab0fd HEAD -- Src/StartMenu/StartMenuHelper/ExplorerTap.cpp | grep -Fq 'ExplorerTapPropertyProbe:'
+          echo 'SOURCE_BASE=10877cb; DIAGNOSTICS_ONLY=yes'
+      - name: Prepare build version
+        shell: pwsh
+        run: |
+          $tag = git describe --tags --abbrev=0 2>$null
+          if ($tag -notmatch '^v[0-9]+[.][0-9]+[.][0-9]+$') { throw "Invalid release tag: $tag" }
+          $v = [version]$tag.Substring(1)
+          $next = "$($v.Major).$($v.Minor).$($v.Build + 1)-pr2563"
+          "CS_VERSION=$next" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build binaries
+        shell: cmd
+        run: Src\Setup\BuildBinaries.bat
+      - name: Build installer components
+        shell: cmd
+        run: Src\Setup\_BuildEnglish.bat
+      - name: Build setup
+        shell: cmd
+        run: Src\Setup\BuildArchives.bat
+      - name: Upload exact installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr2563-setup
+          path: Src/Setup/Final/OpenShellSetup*.exe
+          retention-days: 3
+          if-no-files-found: error
+
+  native-win11:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare guest and validate test syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sudo test -c /dev/kvm
+          ROOT="$RUNNER_TEMP/pr2563"
+          mkdir -p "$ROOT/storage" "$ROOT/oem" "$ROOT/shared" "$ROOT/evidence"
+          cp .github/tap-tests/install.bat "$ROOT/oem/install.bat"
+          cp .github/tap-tests/win11_native_x64_crash_repro.ps1 "$ROOT/oem/win11_native_x64_stress.ps1"
+          export TEST_SCRIPT_PATH="$ROOT/oem/win11_native_x64_stress.ps1"
+          pwsh -NoProfile -NonInteractive -Command '$tokens=$null; $errs=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:TEST_SCRIPT_PATH,[ref]$tokens,[ref]$errs); if($errs.Count -gt 0) { $errs | ForEach-Object { Write-Error $_.Message }; exit 2 }; Write-Output "PS_SYNTAX_OK"'
+          grep -Fq 'SIXTEEN_LIFECYCLES_COMPLETE' "$TEST_SCRIPT_PATH"
+          grep -Fq 'ExplorerTap: connected' "$TEST_SCRIPT_PATH"
+      - name: Download matching installer
+        uses: actions/download-artifact@v8
+        with:
+          name: pr2563-setup
+          path: ${{ runner.temp }}/pr2563/shared
+      - name: Verify installer integrity manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/pr2563/shared"
+          installer="$(find "$ROOT" -type f -name 'OpenShellSetup*.exe' | head -n 1)"
+          test -n "$installer"
+          test -s "$installer"
+          file "$installer"
+          test "$(head -c 2 "$installer")" = MZ
+          dest="$ROOT/OpenShellSetup_4_4_202.exe"
+          if test "$installer" != "$dest"; then mv "$installer" "$dest"; fi
+          sha256sum "$dest" | awk '{print $1}' > "$ROOT/installer.sha256"
+          echo "PR2563_INSTALLER_SHA256=$(cat "$ROOT/installer.sha256")"
+      - name: Run real Windows 11 x64 Explorer tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/pr2563"
+          sudo docker pull dockurr/windows:latest
+          PASS="$(openssl rand -hex 16)"
+          sudo docker run -d --name pr2563-win11 \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -p 127.0.0.1:8006:8006 \
+            -e VERSION=11 -e RAM_SIZE=7G -e CPU_CORES=4 \
+            -e DISK_SIZE=64G -e USERNAME=CIExplorer -e PASSWORD="$PASS" \
+            -e LOG=Y \
+            -v "$ROOT/storage:/storage" -v "$ROOT/oem:/oem" -v "$ROOT/shared:/shared" \
+            dockurr/windows:latest
+          completed=0
+          status=waiting
+          for poll in $(seq 1 160); do
+            if test -s "$ROOT/shared/win11-native-x64-proof.json"; then
+              status="$(python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json,sys
+          try:
+            with open(sys.argv[1],encoding='utf-8-sig') as f: j=json.load(f)
+            print('complete' if j.get('Terminal') is True else j.get('Stage','waiting'))
+          except (OSError,ValueError): print('waiting')
+          PY
+              )"
+              if test "$status" = complete; then completed=1; break; fi
+            fi
+            if ! sudo docker inspect -f '{{.State.Running}}' pr2563-win11 | grep -q true; then echo 'VM_STOPPED'; break; fi
+            if (( poll % 8 == 0 )); then
+              echo "GUEST_POLL=$poll STAGE=$status"
+              sudo docker logs --tail 8 pr2563-win11 2>&1 || true
+            fi
+            sleep 15
+          done
+          test "$completed" -eq 1 || { echo "NO_TERMINAL_REPORT"; exit 2; }
+          python3 - "$ROOT/shared/win11-native-x64-proof.json" <<'PY'
+          import json,sys
+          with open(sys.argv[1],encoding='utf-8-sig') as f: r=json.load(f)
+          print('Guest stage:',r.get('Stage'))
+          print('Windows 11 x64:',r.get('NativeWindows11X64'))
+          print('Explorer cycles:',len(r.get('Cycles',[])))
+          print('TAP connections:',r.get('XamlConnectedCount'))
+          print('Failure:',r.get('Failure'))
+          assert r.get('Stage')=='TEST_COMPLETE',r.get('Failure')
+          assert r.get('NativeWindows11X64') is True
+          assert len(r.get('Cycles',[]))==16
+          assert all(c.get('Passed') is True and c.get('ExplorerPidContinuity') is True for c in r['Cycles'])
+          assert r.get('XamlConnectedCount',0)>=3
+          assert r.get('XamlFailureCount')==0
+          assert r.get('ProbeEventCount',0) > 0, 'No XAML Add/Remove diagnostic events recorded'
+          assert r.get('PropertyReadbackCount',0) >= 4, 'No successful direct XAML property readback observed'
+          assert r.get('PropertyProbeErrors',0) == 0, 'XAML property readback failed'
+          assert r.get('DumpFileCount')==0
+          assert len(r.get('CrashOrHangEvents',[]))==0
+          print('PR2563_NATIVE_WIN11_LIFECYCLE_VALIDATION=PASS')
+          import re
+          record = re.compile(r'ExplorerTapPropertyProbe: handle=(\d+) property=(Visibility|IsHitTestVisible) phase=(\d) setting=(\d) value=(-?\d+) hr=0x([0-9A-Fa-f]+)')
+          initial = {}
+          comparisons = []
+          for line in r.get('PropertyProbeLines', []):
+            match = record.search(line)
+            if not match or int(match.group(6),16) != 0:
+              continue
+            handle, prop, phase, setting, value = match.group(1), match.group(2), int(match.group(3)), int(match.group(4)), int(match.group(5))
+            key = (handle, prop)
+            if phase == 0 and setting == 1:
+              initial[key] = value
+            elif phase == 1 and setting == 0 and key in initial:
+              comparisons.append((key, initial.pop(key), value))
+          mismatches = [(key, before, after) for key,before,after in comparisons if before != after]
+          print('XAML_EFFECTIVE_RESTORE_COMPARISONS=', len(comparisons))
+          print('XAML_EFFECTIVE_RESTORE_MISMATCHES=', mismatches[:15])
+          assert comparisons, 'Missing matching effective-value restore observations'
+          print('NOTE: Does not directly force replacement of the glyph child')
+          PY
+      - name: Collect evidence
+        if: always()
+        shell: bash
+        run: |
+          ROOT="$RUNNER_TEMP/pr2563"
+          mkdir -p "$ROOT/evidence"
+          if sudo docker inspect pr2563-win11 >/dev/null 2>&1; then
+            sudo docker logs --tail 300 pr2563-win11 > "$ROOT/evidence/vm.log" 2>&1 || true
+            sudo docker rm -f pr2563-win11 >/dev/null 2>&1 || true
+          fi
+          cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.png "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.txt "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.log "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.dmp "$ROOT/evidence/" 2>/dev/null || true
+      - name: Upload guest evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr2563-win11-evidence
+          path: ${{ runner.temp }}/pr2563/evidence
+          retention-days: 3
+          if-no-files-found: warn
