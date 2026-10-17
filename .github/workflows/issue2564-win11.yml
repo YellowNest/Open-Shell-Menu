@@ -76,6 +76,7 @@ jobs:
             dockurr/windows:latest
           done=0
           stage=NONE
+          probe_started_at=0
           for i in $(seq 1 160); do
             if test -s "$ROOT/shared/issue2564-win11-proof.json"; then
               state="$(python3 - "$ROOT/shared/issue2564-win11-proof.json" <<'PY'
@@ -87,6 +88,16 @@ jobs:
           PY
               )"
               stage="$(printf '%s' "$state" | cut -d'|' -f1)"
+              if test "$stage" = PROBE_STARTED; then
+                if test "$probe_started_at" -eq 0; then probe_started_at="$(date +%s)"; fi
+                if (( $(date +%s) - probe_started_at > 180 )); then
+                  echo "PROBE_STALLED_AFTER_180_SECONDS"
+                  cp "$ROOT/shared/issue2564-win11-proof.json" "$ROOT/evidence/probe-stall.json" || true
+                  exit 5
+                fi
+              else
+                probe_started_at=0
+              fi
               if test "$(printf '%s' "$state" | cut -d'|' -f2)" = true; then done=1; break; fi
             fi
             if ! sudo docker inspect -f '{{.State.Running}}' issue2564-win11 | grep -q true; then echo VM_STOPPED; break; fi
