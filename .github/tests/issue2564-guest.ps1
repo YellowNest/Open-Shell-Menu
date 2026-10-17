@@ -40,7 +40,14 @@ try{
   Publish 'RUNNING_SHELL_LINK_TEST'
   $out='C:\OEM\issue2564-link-output.txt'
   $err='C:\OEM\issue2564-link-errors.txt'
-  $process=Start-Process -FilePath $probe -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+  $process=Start-Process -FilePath $probe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+  $state['ProbePid']=$process.Id
+  Publish 'PROBE_STARTED'
+  if (-not $process.WaitForExit(120000)) {
+    $state['Results']=@(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
+    $state['Stderr']=@(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+    throw 'Shell link probe did not exit within 120 seconds'
+  }
   $state['ProbeExitCode']=$process.ExitCode
   $state['Results']=@(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
   $state['Stderr']=@(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
