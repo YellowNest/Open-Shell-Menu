@@ -144,8 +144,15 @@ public:
 			{
 				std::lock_guard lock(m_mutex);
 				auto it = std::find(m_elements.begin(), m_elements.end(), element.Handle);
+				if (it == m_elements.end())
+				{
+					auto glyph = std::find_if(m_elements.begin(), m_elements.end(), [&](const StartElement& e) { return e.glyph == element.Handle; });
+					if (glyph != m_elements.end())
+						LogToFile(STARTUP_LOG, L"ExplorerTapProbe: GlyphRemove tap=%p parent=%llu handle=%llu", this, (unsigned long long)glyph->handle, (unsigned long long)element.Handle);
+				}
 				if (it != m_elements.end())
 				{
+					LogToFile(STARTUP_LOG, L"ExplorerTapProbe: ControlRemove tap=%p handle=%llu", this, (unsigned long long)element.Handle);
 					m_elements.erase(it);
 					interesting = true;
 				}
@@ -159,6 +166,8 @@ public:
 					record.handle = element.Handle;
 
 					std::lock_guard lock(m_mutex);
+					bool duplicate = std::find(m_elements.begin(), m_elements.end(), element.Handle) != m_elements.end();
+					LogToFile(STARTUP_LOG, L"ExplorerTapProbe: ControlAdd tap=%p handle=%llu duplicate=%d", this, (unsigned long long)element.Handle, duplicate);
 					m_elements.push_back(record);
 
 					interesting = true;
@@ -171,6 +180,7 @@ public:
 					auto it = std::find(m_elements.begin(), m_elements.end(), parent);
 					if (it != m_elements.end())
 					{
+						LogToFile(STARTUP_LOG, L"ExplorerTapProbe: GlyphAdd tap=%p parent=%llu handle=%llu previous=%llu duplicate=%d", this, (unsigned long long)parent, (unsigned long long)element.Handle, (unsigned long long)it->glyph, it->glyph == element.Handle);
 						it->glyph = element.Handle;
 						it->visibilityOverride = false; // A newly added glyph has no override yet.
 						interesting = true;
