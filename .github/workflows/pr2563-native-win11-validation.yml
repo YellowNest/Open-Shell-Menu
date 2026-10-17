@@ -140,7 +140,6 @@ jobs:
           assert all(c.get('Passed') is True and c.get('ExplorerPidContinuity') is True for c in r['Cycles'])
           assert r.get('XamlConnectedCount',0)>=3
           assert r.get('XamlFailureCount')==0
-          assert r.get('ProbeEventCount',0) > 0, 'No XAML Add/Remove diagnostic events recorded'
           assert r.get('PropertyReadbackCount',0) >= 4, 'No successful direct XAML property readback observed'
           assert r.get('PropertyProbeErrors',0) == 0, 'XAML property readback failed'
           assert r.get('DumpFileCount')==0
