@@ -43,9 +43,29 @@ try{
   $process=Start-Process -FilePath $probe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
   $state['ProbePid']=$process.Id
   Publish 'PROBE_STARTED'
-  if (-not $process.WaitForExit(120000)) {
+  # Poll rather than blocking in WaitForExit, preserving the last completed
+  # Shell assertion and process state for a stalled Windows 11 guest.
+  $probeStarted=Get-Date
+  for ($poll=0; $poll -lt 24; $poll++) {
+    $process.Refresh()
+    if ($process.HasExited) { break }
+    Start-Sleep -Seconds 5
+    $state['ProbeElapsedSeconds']=[int]((Get-Date)-$probeStarted).TotalSeconds
+    $state['ProbeStdoutLines']=@(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
+    $state['ProbeStderrLines']=@(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+    $live=Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+    if ($live) {
+      $state['ProbeCpuSeconds']=[double]$live.CPU
+      $state['ProbeThreadCount']=$live.Threads.Count
+    }
+    Publish 'PROBE_STARTED'
+  }
+  $process.Refresh()
+  if (-not $process.HasExited) {
     $state['Results']=@(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue)
     $state['Stderr']=@(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+    try { Stop-Process -Id $process.Id -Force -ErrorAction Stop; $state['ProbeTerminated']= $true }
+    catch { $state['ProbeTerminationError']=$_.Exception.Message }
     throw 'Shell link probe did not exit within 120 seconds'
   }
   $state['ProbeExitCode']=$process.ExitCode
