@@ -10,6 +10,7 @@
 static bool Check(bool ok, const char* what)
 {
     printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
+    fflush(stdout); // Preserve the last completed assertion if the next Shell API blocks.
     return ok;
 }
 
