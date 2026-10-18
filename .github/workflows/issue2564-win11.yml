@@ -10,6 +10,7 @@ on:
       - .github/workflows/issue2564-win11.yml
       - .github/tests/issue2564-guest.ps1
       - .github/tests/issue2564-oem-install.bat
+      - .github/tests/issue2564_link_target.cpp
 jobs:
   native-win11:
     runs-on: ubuntu-24.04
@@ -28,32 +29,43 @@ jobs:
           cp .github/tests/issue2564-oem-install.bat "$ROOT/oem/install.bat"
           export GUEST_PS="$ROOT/oem/issue2564-guest.ps1"
           pwsh -NoProfile -NonInteractive -Command '$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:GUEST_PS,[ref]$t,[ref]$e); if($e.Count){$e | ForEach-Object {Write-Error $_.Message};exit 2};"PS_SYNTAX_OK"'
-      - name: Verify exact diagnostic source
+      - name: Record exact diagnostic source
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD:.github/tests/issue2564_link_target.cpp)" = d8b25d9114b4d9d4c59fbc769586d6030ab07830
-          echo 'PROBE_SOURCE_REVISION=bd511b95'
-      - name: Confirm tested Windows probe artifact
+          test -s .github/tests/issue2564_link_target.cpp
+          echo "DIAGNOSTIC_SOURCE_BLOB=$(git rev-parse HEAD:.github/tests/issue2564_link_target.cpp)"
+      - name: Locate same-commit Windows probe build
+        id: probe_run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
-            status="$(gh api repos/YellowNest/Open-Shell-Menu/actions/runs/39119984112 --jq '.status')"
-            names="$(gh api repos/YellowNest/Open-Shell-Menu/actions/runs/39119984112/artifacts --jq '.artifacts[].name')"
-            if printf '%s\n' "$names" | grep -Fxq issue2564-link-probe; then exit 0; fi
-            if test "$status" = completed; then echo "PROBE_NOT_PUBLISHED"; exit 2; fi
+          for i in $(seq 1 120); do
+            run_id="$(gh api 'repos/YellowNest/Open-Shell-Menu/actions/workflows/issue2564-verify.yml/runs?branch=fix/issue2564-opencontaining-target-20261016&per_page=20' --jq ".workflow_runs[] | select(.head_sha == \"$EXPECTED_SHA\") | .id" | head -n 1)"
+            if test -n "$run_id"; then
+              build_sha="$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/$run_id" --jq '.head_sha')"
+              test "$build_sha" = "$EXPECTED_SHA" || { echo "PROBE_REVISION_MISMATCH"; exit 2; }
+              status="$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/$run_id" --jq '.status')"
+              names="$(gh api "repos/YellowNest/Open-Shell-Menu/actions/runs/$run_id/artifacts" --jq '.artifacts[].name')"
+              if printf '%s\n' "$names" | grep -Fxq issue2564-link-probe; then
+                echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+                echo "SAME_COMMIT_PROBE_BUILD=$run_id SHA=$build_sha"
+                exit 0
+              fi
+              if test "$status" = completed; then echo "EXACT_REVISION_PROBE_BUILD_MISSING"; exit 3; fi
+            fi
             sleep 10
           done
-          echo "PROBE_WAIT_EXPIRED"
-          exit 3
+          echo "EXACT_REVISION_BUILD_TIMEOUT"
+          exit 4
       - uses: actions/download-artifact@v8
         with:
           name: issue2564-link-probe
           repository: YellowNest/Open-Shell-Menu
-          run-id: 39119984112
+          run-id: ${{ steps.probe_run.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/issue2564/shared
       - name: Verify Windows executable and manifest
@@ -98,6 +110,12 @@ jobs:
                 if test "$probe_started_at" -eq 0; then probe_started_at="$(date +%s)"; fi
                 if (( $(date +%s) - probe_started_at > 180 )); then
                   echo "PROBE_STALLED_AFTER_180_SECONDS"
+                  if test -f "$ROOT/shared/issue2564-native-progress.log"; then
+                    echo "NATIVE_PROGRESS_AT_STALL:"
+                    tail -n 40 "$ROOT/shared/issue2564-native-progress.log"
+                  else
+                    echo "NO_NATIVE_PROGRESS_FILE"
+                  fi
                   cp "$ROOT/shared/issue2564-win11-proof.json" "$ROOT/evidence/probe-stall.json" || true
                   exit 5
                 fi
@@ -140,6 +158,7 @@ jobs:
           fi
           cp "$ROOT/shared/"*.json "$ROOT/evidence/" 2>/dev/null || true
           cp "$ROOT/shared/"*.txt "$ROOT/evidence/" 2>/dev/null || true
+          cp "$ROOT/shared/"*.log "$ROOT/evidence/" 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         if: always()
         with:

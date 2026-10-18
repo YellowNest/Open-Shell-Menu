@@ -37,6 +37,8 @@ try{
   $actual=(Get-FileHash $probe -Algorithm SHA256).Hash.ToLowerInvariant()
   $state['ProbeSHA256']=$actual
   Check ($expected -match '^[0-9a-f]{64}$' -and $expected -eq $actual) 'Compiled Windows probe hash mismatch'
+  $env:ISSUE2564_REPORT_ROOT=$share
+  $state['NativeReportDirectory']=$share
   Publish 'RUNNING_SHELL_LINK_TEST'
   $out='C:\OEM\issue2564-link-output.txt'
   $err='C:\OEM\issue2564-link-errors.txt'
