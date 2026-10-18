@@ -144,7 +144,6 @@ jobs:
           assert r.get('PropertyProbeErrors',0) == 0, 'XAML property readback failed'
           assert r.get('DumpFileCount')==0
           assert len(r.get('CrashOrHangEvents',[]))==0
-          print('PR2563_NATIVE_WIN11_LIFECYCLE_VALIDATION=PASS')
           import re
           record = re.compile(r'ExplorerTapPropertyProbe: handle=(\d+) property=(Visibility|IsHitTestVisible) phase=(\d) setting=(\d) value=(-?\d+) hr=0x([0-9A-Fa-f]+)')
           initial = {}
@@ -163,6 +162,8 @@ jobs:
           print('XAML_EFFECTIVE_RESTORE_COMPARISONS=', len(comparisons))
           print('XAML_EFFECTIVE_RESTORE_MISMATCHES=', mismatches[:15])
           assert comparisons, 'Missing matching effective-value restore observations'
+          assert not mismatches, f'XAML effective value restoration mismatches: {mismatches[:15]}'
+          print('PR2563_NATIVE_WIN11_LIFECYCLE_VALIDATION=PASS')
           print('NOTE: Does not directly force replacement of the glyph child')
           PY
       - name: Collect evidence
